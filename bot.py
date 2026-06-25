@@ -13,6 +13,7 @@ ADMIN_USERNAME = "@Hardy495"
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 MEMORY_FILE = "memory.json"
+ADMIN_FILE = "admin.json"
 guest_states = {}
 conversation_history = {}
 pending_guest = {}
@@ -32,6 +33,21 @@ DEPOSIT = 2000
 PAYMENT_INFO = """+79181180045
 СБЕРБАНК, Т-БАНК
 Получатель: Антон Анатольевич А."""
+
+def load_admin_chat_id():
+    """Загрузить ADMIN_CHAT_ID из файла"""
+    if os.path.exists(ADMIN_FILE):
+        with open(ADMIN_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("admin_chat_id")
+    return None
+
+def save_admin_chat_id(chat_id):
+    """Сохранить ADMIN_CHAT_ID в файл"""
+    with open(ADMIN_FILE, "w") as f:
+        json.dump({"admin_chat_id": chat_id}, f)
+
+ADMIN_CHAT_ID = load_admin_chat_id()
 
 def load_memory():
     if os.path.exists(MEMORY_FILE):
@@ -336,6 +352,7 @@ async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global ADMIN_CHAT_ID
     ADMIN_CHAT_ID = str(update.effective_chat.id)
+    save_admin_chat_id(ADMIN_CHAT_ID)
     await update.message.reply_text(
         "✅ Уведомления активированы!\n\n"
         "Когда гость задаёт вопрос — бот пришлёт уведомление.\n"
