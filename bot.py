@@ -411,10 +411,14 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Ищу гостя и отправляю реквизиты..."
         )
 
-        # Ищем гостя в активных сессиях
+        # Ищем гостя в активных сессиях по схожести имени
         guest_id = None
+        best_match = None
         for saved_name, uid in guest_name_to_id.items():
-            if name.lower() in saved_name or saved_name in name.lower():
+            # Проверяем любое пересечение слов между именами
+            saved_words = set(saved_name.lower().split())
+            new_words = set(name.lower().split())
+            if saved_words & new_words:  # есть общие слова
                 guest_id = uid
                 break
 
@@ -571,52 +575,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=update.message.message_id
             )
         guest_states[user_id] = "waiting_payment"
-
-        # Ищем сумму по имени гостя
-        guest_name = context.user_data.get("guest_name", "").lower()
-        balance = None
-        for name_key, amount in guest_balances.items():
-            if name_key in guest_name or guest_name in name_key:
-                balance = amount
-                break
-
-        if balance is not None:
-            total = balance + DEPOSIT
-            await update.message.reply_text(
-                "✅ Паспорт принят, спасибо!\n\n"
-                f"💰 *Для завершения оформления необходимо оплатить:*\n\n"
-                f"• Остаток по бронированию: *{balance} руб.*\n"
-                f"• Залог: *{DEPOSIT} руб.* _(возвращается в день выезда до конца дня при отсутствии повреждений)_\n"
-                f"• *Итого: {total} руб.*\n\n"
-                f"Реквизиты для оплаты:\n{PAYMENT_INFO}\n\n"
-                f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.\n"
-                f"После оплаты пришлите чек в этот чат 🧾",
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text(
-                "✅ Паспорт принят, спасибо!\n\n"
-                "Сейчас уточню сумму остатка по вашей брони у администратора и сообщу вам в течение 10 минут. ⏱"
-            )
-            if ADMIN_CHAT_ID:
-                msg = await context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=f"⚠️ *Не найдена сумма для гостя!*\n\n"
-                         f"Гость: {username}\n"
-                         f"ФИО: {context.user_data.get('guest_name', 'не указано')}\n"
-                         f"Ночей: {context.user_data.get('nights', 'не указано')}\n\n"
-                         f"Установите сумму командой:\n"
-                         f"`/balance {context.user_data.get('guest_name', 'ФИО')} СУММА`",
-                    parse_mode="Markdown"
-                )
+        await update.message.reply_text(
+            "✅ Паспорт принят, спасибо!\n\n"
+            "Теперь пришлите чек об оплате 🧾"
+        )
 
     elif state == "waiting_payment":
-        # Получаем ожидаемую сумму
+        # Получаем ожидаемую сумму из данных гостя
         guest_name = context.user_data.get("guest_name", "").lower()
+        date_from = context.user_data.get("date_from", "")
         expected_amount = None
-        for name_key, amount in guest_balances.items():
-            if name_key in guest_name or guest_name in name_key:
-                expected_amount = amount + DEPOSIT
+        for key, data in guest_balances.items():
+            name_match = data["name_lower"] in guest_name or guest_name in data["name_lower"]
+            date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
+            if name_match and date_match:
+                expected_amount = data["amount"] + DEPOSIT
                 break
 
         is_valid, reason = await analyze_photo_with_ai(bytes(photo_bytes), "payment", expected_amount)
@@ -831,14 +804,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["date_to"] = date_to
         guest_name_to_id[name.lower()] = user_id
 
-        # Ищем бронь по имени и датам
+        # Ищем бронь через ИИ — умное сравнение
         balance_data = None
-        for key, data in guest_balances.items():
-            name_match = data["name_lower"] in name.lower() or name.lower() in data["name_lower"]
-            date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
-            if name_match and date_match:
-                balance_data = data
-                break
+        if guest_balances:
+            # Формируем список броней для ИИ
+            bookings_text = ""
+            booking_keys = []
+            for i, (key, data) in enumerate(guest_balances.items()):
+                bookings_text += f"{i+1}. Имя: {data['name']}, заезд: {data['date_from']}, выезд: {data['date_to']}\n"
+                booking_keys.append(key)
+
+            match_response = claude.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=50,
+                messages=[{
+                    "role": "user",
+                    "content": f"""Гость написал: "{raw}"
+Из этого текста извлечено: имя="{name}", заезд="{date_from}", выезд="{date_to}"
+
+Список броней в базе:
+{bookings_text}
+
+Найди наиболее подходящую бронь. Учитывай что:
+- Имя может быть написано по-разному (только фамилия, только имя, с опечатками)
+- Даты могут быть в разных форматах
+- Ищи по совпадению хотя бы части имени И дат
+
+Ответь ТОЛЬКО номером подходящей брони (1, 2, 3...) или 0 если ничего не подходит."""
+                }]
+            )
+
+            try:
+                match_num = int(match_response.content[0].text.strip())
+                if 1 <= match_num <= len(booking_keys):
+                    matched_key = booking_keys[match_num - 1]
+                    balance_data = guest_balances[matched_key]
+            except:
+                balance_data = None
 
         # Уведомляем админа
         if ADMIN_CHAT_ID:
