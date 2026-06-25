@@ -379,29 +379,48 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ИИ парсит свободный текст
     parse_response = claude.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=100,
+        max_tokens=150,
         messages=[{
             "role": "user",
-            "content": f"""Из текста извлеки: имя гостя, дату заезда, дату выезда и сумму остатка.
+            "content": f"""Из текста извлеки данные бронирования.
 Текст: "{full_text}"
 
-Ответь строго JSON без лишнего:
-{{"name": "имя", "date_from": "дата", "date_to": "дата", "amount": число}}
+Ответь строго в таком формате (каждое на новой строке):
+ИМЯ: (имя гостя)
+ЗАЕЗД: (дата заезда)
+ВЫЕЗД: (дата выезда)
+СУММА: (только число)
 
-Сумма — последнее число в тексте. Даты записывай как есть."""
+Если дата или имя не указаны — оставь поле пустым. Сумма — последнее число в тексте."""
         }]
     )
 
     try:
-        import json as json_module
-        parsed = json_module.loads(parse_response.content[0].text.strip())
-        name = parsed.get("name", "").strip()
-        date_from = parsed.get("date_from", "").strip()
-        date_to = parsed.get("date_to", "").strip()
-        amount = int(parsed.get("amount", 0))
+        raw = parse_response.content[0].text.strip()
+        name = ""
+        date_from = ""
+        date_to = ""
+        amount = 0
+
+        for line in raw.split("\n"):
+            line = line.strip()
+            if line.upper().startswith("ИМЯ:"):
+                name = line.split(":", 1)[-1].strip()
+            elif line.upper().startswith("ЗАЕЗД:"):
+                date_from = line.split(":", 1)[-1].strip()
+            elif line.upper().startswith("ВЫЕЗД:"):
+                date_to = line.split(":", 1)[-1].strip()
+            elif line.upper().startswith("СУММА:"):
+                try:
+                    amount = int(line.split(":", 1)[-1].strip().replace(" ", ""))
+                except:
+                    pass
 
         if not name or not amount:
-            await update.message.reply_text("Не удалось распознать. Пример:\n/balance Елена с 01.02 по 05.02 8000")
+            await update.message.reply_text(
+                "Не удалось распознать имя или сумму.\n"
+                "Пример: /balance Елена с 01.02 по 05.02 8000"
+            )
             return
 
         total = amount + DEPOSIT
