@@ -1,9 +1,10 @@
 import os
 import json
+import base64
 import anthropic
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 
 load_dotenv()
 
@@ -14,6 +15,11 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 MEMORY_FILE = "memory.json"
 guest_states = {}
 conversation_history = {}
+pending_guest = {}
+
+# Храним: message_id уведомления -> guest_id
+# Чтобы когда админ делает Reply — знать кому отвечать
+notification_to_guest = {}
 
 def load_memory():
     if os.path.exists(MEMORY_FILE):
@@ -38,32 +44,116 @@ def get_all_knowledge():
             text += f"{i}. {note}\n"
     return text if text else "База знаний пока пуста."
 
-SYSTEM_PROMPT = """Ты вежливый и профессиональный помощник для гостей. Ты помогаешь гостям с вопросами о заселении и проживании.
+SYSTEM_PROMPT = """Ты вежливый и профессиональный помощник для гостей апартаментов Alekseev Apartments.
 
 Вот вся информация которую ты знаешь:
 {knowledge}
 
-Правила общения:
+Правила:
 - Отвечай только на русском языке
 - Будь вежлив и дружелюбен
-- Используй всю доступную информацию чтобы помочь гостю
-- Не придумывай информацию которой нет в базе знаний
-- Если вопрос касается конкретного объекта — дай информацию только по нему
+- Используй только информацию из базы знаний
+- Не придумывай то чего нет в базе
 
-Если ты не можешь ответить на вопрос — верни ровно эту фразу без изменений: [НУЖЕН_ОПЕРАТОР]
+Если не можешь ответить — верни ровно: [НУЖЕН_ОПЕРАТОР]
 """
 
 def is_admin(user):
     return user.username and f"@{user.username}".lower() == ADMIN_USERNAME.lower()
 
-async def notify_admin(context, message, user):
-    if ADMIN_CHAT_ID:
-        username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user.id})"
+async def notify_admin_question(context, question, user):
+    """Уведомить админа о вопросе гостя и сохранить связь message_id -> guest_id"""
+    if not ADMIN_CHAT_ID:
+        return
+    username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user.id})"
+    msg = await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"❓ *Вопрос от гостя {username}:*\n\n{question}\n\n"
+             f"_Нажмите Reply на это сообщение и напишите ответ — он автоматически уйдёт гостю_",
+        parse_mode="Markdown"
+    )
+    # Сохраняем связь: message_id -> guest user_id
+    notification_to_guest[msg.message_id] = user.id
+
+async def analyze_photo_with_ai(photo_bytes: bytes, expected_type: str) -> tuple[bool, str]:
+    image_data = base64.standard_b64encode(photo_bytes).decode("utf-8")
+    if expected_type == "passport":
+        prompt = """Внимательно посмотри на это изображение. 
+        Это паспорт или документ удостоверяющий личность? 
+        Ответь только: ДА если это паспорт/удостоверение личности, или НЕТ если это что-то другое.
+        После ДА или НЕТ напиши через | краткое объяснение на русском."""
+    else:
+        prompt = """Внимательно посмотри на это изображение.
+        Это чек об оплате, квитанция или подтверждение платежа?
+        Ответь только: ДА если это чек/квитанция/подтверждение оплаты, или НЕТ если это что-то другое.
+        После ДА или НЕТ напиши через | краткое объяснение на русском."""
+
+    response = claude.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=200,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
+                {"type": "text", "text": prompt}
+            ]
+        }]
+    )
+    result = response.content[0].text.strip()
+    is_valid = result.upper().startswith("ДА")
+    explanation = result.split("|")[1].strip() if "|" in result else ""
+    return is_valid, explanation
+
+async def send_apartment_buttons(context, chat_id, guest_id, guest_name):
+    memory = load_memory()
+    objects = memory.get("objects", {})
+    if not objects:
         await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=f"🔔 *Требуется ваше внимание!*\n\nГость: {username}\nВопрос: {message}",
-            parse_mode="Markdown"
+            chat_id=chat_id,
+            text="⚠️ База апартаментов пуста! Добавьте объекты через /add"
         )
+        return
+    pending_guest[str(chat_id)] = guest_id
+    buttons = []
+    for name in objects.keys():
+        buttons.append([InlineKeyboardButton(f"🏠 {name}", callback_data=f"apt_{name}")])
+    keyboard = InlineKeyboardMarkup(buttons)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"✅ Документы гостя {guest_name} проверены!\n\nВыберите апартамент:",
+        reply_markup=keyboard
+    )
+
+async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not query.data.startswith("apt_"):
+        return
+    apt_name = query.data[4:]
+    admin_chat_id = str(query.message.chat_id)
+    guest_id = pending_guest.get(admin_chat_id)
+    if not guest_id:
+        await query.edit_message_text("❌ Не удалось найти гостя.")
+        return
+    memory = load_memory()
+    apt_info = memory["objects"].get(apt_name)
+    if not apt_info:
+        await query.edit_message_text(f"❌ Апартамент '{apt_name}' не найден.")
+        return
+    await context.bot.send_message(
+        chat_id=guest_id,
+        text=f"✅ Ваша оплата подтверждена!\n\n"
+             f"🏠 *{apt_name}*\n\n{apt_info}\n\n"
+             f"Если возникнут вопросы — я всегда готов помочь! 😊",
+        parse_mode="Markdown"
+    )
+    guest_states[guest_id] = "verified"
+    conversation_history[guest_id] = []
+    await query.edit_message_text(
+        f"✅ Информация по *{apt_name}* отправлена гостю!",
+        parse_mode="Markdown"
+    )
+    del pending_guest[admin_chat_id]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -73,18 +163,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Команды:\n"
             "/admin — активировать уведомления\n"
             "/remember [текст] — запомнить информацию\n"
-            "/add [название] | [инфо] — добавить объект\n"
-            "/list — вся база знаний\n"
+            "/add [название] | [инфо] — добавить апартамент\n"
+            "/list — база знаний\n"
             "/delnote [номер] — удалить заметку\n"
-            "/delobj [название] — удалить объект"
+            "/delobj [название] — удалить апартамент\n\n"
+            "💡 Когда гость задаёт вопрос которого нет в базе — бот пришлёт его сюда. "
+            "Нажмите *Reply* на сообщение и напишите ответ — он уйдёт гостю автоматически.",
+            parse_mode="Markdown"
         )
         return
     guest_states[user_id] = "waiting_passport"
     conversation_history[user_id] = []
     await update.message.reply_text(
-        "Здравствуйте! 👋 Добро пожаловать!\n\n"
-        "Я помогу вам с информацией о заселении и отвечу на ваши вопросы.\n\n"
-        "Для начала нам необходимо:\n"
+        "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
+        "Я помогу вам с заселением и отвечу на все вопросы.\n\n"
+        "Для начала нам необходимо верифицировать вас:\n"
         "1️⃣ Фото паспорта (лицевая сторона)\n"
         "2️⃣ Чек об оплате\n\n"
         "Пожалуйста, пришлите фото паспорта 📄"
@@ -97,26 +190,16 @@ async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ADMIN_CHAT_ID = str(update.effective_chat.id)
     await update.message.reply_text(
         "✅ Уведомления активированы!\n\n"
-        "📋 Ваши команды:\n"
-        "/remember [текст] — запомнить любую информацию\n"
-        "/add [название] | [информация] — добавить объект\n"
-        "/list — посмотреть всю базу знаний\n"
-        "/delnote [номер] — удалить заметку\n"
-        "/delobj [название] — удалить объект"
+        "Теперь когда гость задаёт сложный вопрос — бот пришлёт его сюда.\n"
+        "Нажмите *Reply* и напишите ответ — он уйдёт гостю автоматически! 👌",
+        parse_mode="Markdown"
     )
 
 async def remember(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user):
-        await update.message.reply_text("У вас нет доступа к этой команде.")
         return
     if not context.args:
-        await update.message.reply_text(
-            "Использование:\n/remember [любая информация]\n\n"
-            "Примеры:\n"
-            "/remember Гостям нельзя курить в квартире\n"
-            "/remember Парковка бесплатная во дворе всех объектов\n"
-            "/remember Если сломался замок — мастер 89001234567"
-        )
+        await update.message.reply_text("Использование: /remember [текст]")
         return
     note = " ".join(context.args)
     memory = load_memory()
@@ -126,12 +209,12 @@ async def remember(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user):
-        await update.message.reply_text("У вас нет доступа к этой команде.")
         return
     if not context.args:
         await update.message.reply_text(
             "Использование:\n/add Название | Информация\n\n"
-            "Пример:\n/add Квартира Ленина 5 | Код домофона: 1234, WiFi: MyHome пароль 12345678, заселение с 14:00"
+            "Пример:\n/add Апартамент №1 | Адрес: ул. Ленина 5, кв.10. Код домофона: 1234. "
+            "WiFi: MyHome, пароль: 12345678. Заселение с 14:00, выезд до 12:00."
         )
         return
     full_text = " ".join(context.args)
@@ -142,20 +225,19 @@ async def add_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
     memory = load_memory()
     memory["objects"][name.strip()] = info.strip()
     save_memory(memory)
-    await update.message.reply_text(f"✅ Объект '{name.strip()}' добавлен!")
+    await update.message.reply_text(f"✅ Апартамент '{name.strip()}' добавлен!")
 
 async def list_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user):
-        await update.message.reply_text("У вас нет доступа к этой команде.")
         return
     memory = load_memory()
     text = "📋 *Вся база знаний:*\n\n"
     if memory["objects"]:
-        text += "🏠 *Объекты:*\n"
+        text += "🏠 *Апартаменты:*\n"
         for name, info in memory["objects"].items():
             text += f"\n*{name}*\n{info}\n"
     else:
-        text += "🏠 Объекты: пусто\n"
+        text += "🏠 Апартаменты: пусто\n"
     if memory["notes"]:
         text += "\n📝 *Заметки:*\n"
         for i, note in enumerate(memory["notes"], 1):
@@ -166,10 +248,9 @@ async def list_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def delete_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user):
-        await update.message.reply_text("У вас нет доступа к этой команде.")
         return
     if not context.args:
-        await update.message.reply_text("Использование: /delnote [номер]\nНомер смотрите в /list")
+        await update.message.reply_text("Использование: /delnote [номер]")
         return
     try:
         index = int(context.args[0]) - 1
@@ -179,25 +260,24 @@ async def delete_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_memory(memory)
             await update.message.reply_text(f"✅ Удалено:\n{removed}")
         else:
-            await update.message.reply_text("Заметка с таким номером не найдена.")
+            await update.message.reply_text("Заметка не найдена.")
     except ValueError:
-        await update.message.reply_text("Укажите номер заметки цифрой.")
+        await update.message.reply_text("Укажите номер цифрой.")
 
 async def delete_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user):
-        await update.message.reply_text("У вас нет доступа к этой команде.")
         return
     if not context.args:
-        await update.message.reply_text("Использование: /delobj Название объекта")
+        await update.message.reply_text("Использование: /delobj Название")
         return
     name = " ".join(context.args)
     memory = load_memory()
     if name in memory["objects"]:
         del memory["objects"][name]
         save_memory(memory)
-        await update.message.reply_text(f"✅ Объект '{name}' удалён.")
+        await update.message.reply_text(f"✅ Апартамент '{name}' удалён.")
     else:
-        await update.message.reply_text(f"Объект '{name}' не найден. Проверьте название в /list")
+        await update.message.reply_text(f"Апартамент '{name}' не найден.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -205,11 +285,30 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = guest_states.get(user_id)
     username = f"@{user.username}" if user.username else f"{user.first_name}"
 
+    if state not in ["waiting_passport", "waiting_payment"]:
+        await update.message.reply_text("Спасибо за фото! Если есть вопросы — задавайте 😊")
+        return
+
+    await update.message.reply_text("🔍 Проверяю документ...")
+    photo = update.message.photo[-1]
+    photo_file = await context.bot.get_file(photo.file_id)
+    photo_bytes = await photo_file.download_as_bytearray()
+
     if state == "waiting_passport":
+        is_valid, _ = await analyze_photo_with_ai(bytes(photo_bytes), "passport")
+        if not is_valid:
+            await update.message.reply_text(
+                "❌ Это не похоже на паспорт.\n\n"
+                "Пожалуйста, пришлите фото *лицевой стороны паспорта* 📄\n\n"
+                "Убедитесь что:\n• Фото чёткое\n• Видны все данные\n• Это именно паспорт",
+                parse_mode="Markdown"
+            )
+            return
         if ADMIN_CHAT_ID:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
-                text=f"📄 Паспорт от гостя: {username} (ID: {user_id})"
+                text=f"📄 *Паспорт от гостя:* {username} (ID: {user_id})\n✅ ИИ подтвердил",
+                parse_mode="Markdown"
             )
             await context.bot.forward_message(
                 chat_id=ADMIN_CHAT_ID,
@@ -217,31 +316,38 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=update.message.message_id
             )
         guest_states[user_id] = "waiting_payment"
-        await update.message.reply_text(
-            "✅ Паспорт получен, спасибо!\n\n"
-            "Теперь пришлите чек об оплате 🧾"
-        )
+        await update.message.reply_text("✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾")
+
     elif state == "waiting_payment":
+        is_valid, _ = await analyze_photo_with_ai(bytes(photo_bytes), "payment")
+        if not is_valid:
+            await update.message.reply_text(
+                "❌ Это не похоже на чек об оплате.\n\n"
+                "Пришлите *чек или подтверждение оплаты* 🧾\n\n"
+                "Это может быть:\n• Скриншот из банка\n• Фото бумажного чека\n• Подтверждение перевода",
+                parse_mode="Markdown"
+            )
+            return
         if ADMIN_CHAT_ID:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
-                text=f"🧾 Чек от гостя: {username} (ID: {user_id})\nПроверьте оплату и подтвердите гостю."
+                text=f"🧾 *Чек от гостя:* {username} (ID: {user_id})\n✅ ИИ подтвердил",
+                parse_mode="Markdown"
             )
             await context.bot.forward_message(
                 chat_id=ADMIN_CHAT_ID,
                 from_chat_id=update.effective_chat.id,
                 message_id=update.message.message_id
             )
-        guest_states[user_id] = "verified"
-        conversation_history[user_id] = []
+        guest_states[user_id] = "waiting_admin_confirmation"
         await update.message.reply_text(
             "✅ Чек получен!\n\n"
-            "Документы переданы на проверку. Как только оплата подтверждена — "
-            "вы получите всю информацию о заселении.\n\n"
-            "Если есть вопросы — я готов помочь! 😊"
+            "Документы переданы на проверку. "
+            "Как только оплата подтверждена — вы получите всю информацию о заселении.\n\n"
+            "⏱ Обычно это занимает не более 10 минут."
         )
-    else:
-        await update.message.reply_text("Спасибо за фото! Если есть вопросы — задавайте 😊")
+        if ADMIN_CHAT_ID:
+            await send_apartment_buttons(context, ADMIN_CHAT_ID, user_id, username)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -249,35 +355,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     state = guest_states.get(user_id)
 
+    # Если это админ отвечает через Reply на вопрос гостя
     if is_admin(user):
+        reply_to = update.message.reply_to_message
+        if reply_to and reply_to.message_id in notification_to_guest:
+            guest_id = notification_to_guest[reply_to.message_id]
+            await context.bot.send_message(
+                chat_id=guest_id,
+                text=f"💬 *Ответ оператора:*\n\n{user_text}",
+                parse_mode="Markdown"
+            )
+            await update.message.reply_text("✅ Ответ отправлен гостю!")
+            return
+        # Обычное сообщение от админа
         await update.message.reply_text(
-            "Привет! Вы вошли как администратор 👋\n\n"
-            "Команды:\n"
+            "Привет! Команды:\n"
             "/admin — активировать уведомления\n"
             "/remember [текст] — запомнить информацию\n"
-            "/add [название] | [инфо] — добавить объект\n"
-            "/list — вся база знаний\n"
+            "/add [название] | [инфо] — добавить апартамент\n"
+            "/list — база знаний\n"
             "/delnote [номер] — удалить заметку\n"
-            "/delobj [название] — удалить объект"
+            "/delobj [название] — удалить апартамент"
         )
         return
 
     if state is None:
         guest_states[user_id] = "waiting_passport"
         await update.message.reply_text(
-            "Здравствуйте! 👋\n\n"
-            "Для начала пришлите фото паспорта (лицевая сторона) 📄"
+            "Здравствуйте! 👋\n\nДля начала пришлите фото паспорта (лицевая сторона) 📄"
         )
         return
 
     if state == "waiting_passport":
-        await update.message.reply_text("Пожалуйста, пришлите фото паспорта (лицевая сторона) 📄")
+        await update.message.reply_text("Пожалуйста, пришлите фото паспорта 📄")
         return
 
     if state == "waiting_payment":
         await update.message.reply_text("Пожалуйста, пришлите чек об оплате 🧾")
         return
 
+    if state == "waiting_admin_confirmation":
+        await update.message.reply_text(
+            "⏱ Ваши документы на проверке.\n"
+            "Оператор подтвердит оплату в течение 10 минут."
+        )
+        return
+
+    # Верифицированный гость — отвечаем через Claude
     if user_id not in conversation_history:
         conversation_history[user_id] = []
 
@@ -296,7 +420,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = response.content[0].text
 
     if "[НУЖЕН_ОПЕРАТОР]" in reply:
-        await notify_admin(context, user_text, user)
+        await notify_admin_question(context, user_text, user)
         await update.message.reply_text(
             "Спасибо за ваш вопрос! 🙏\n\n"
             "По этому вопросу с вами свяжется оператор в течение 10 минут."
@@ -314,6 +438,7 @@ app.add_handler(CommandHandler("add", add_object))
 app.add_handler(CommandHandler("list", list_knowledge))
 app.add_handler(CommandHandler("delnote", delete_note))
 app.add_handler(CommandHandler("delobj", delete_object))
+app.add_handler(CallbackQueryHandler(handle_apartment_selection))
 app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
