@@ -370,23 +370,41 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     full_text = " ".join(context.args) if context.args else ""
-
-    if "|" not in full_text or full_text.count("|") < 3:
+    if not full_text:
         await update.message.reply_text(
-            "Формат: /balance имя | дата заезда | дата выезда | сумма\n"
-            "Пример: /balance Елена | 27.06 | 30.06 | 3500"
+            "Пример:\n/balance Елена с 01.02 по 05.02 8000"
         )
         return
 
-    parts = [p.strip() for p in full_text.split("|")]
-    try:
-        name = parts[0].strip()
-        date_from = parts[1].strip()
-        date_to = parts[2].strip()
-        amount = int(parts[3].strip())
-        total = amount + DEPOSIT
+    # ИИ парсит свободный текст
+    parse_response = claude.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=100,
+        messages=[{
+            "role": "user",
+            "content": f"""Из текста извлеки: имя гостя, дату заезда, дату выезда и сумму остатка.
+Текст: "{full_text}"
 
-        # Сохраняем бронь
+Ответь строго JSON без лишнего:
+{{"name": "имя", "date_from": "дата", "date_to": "дата", "amount": число}}
+
+Сумма — последнее число в тексте. Даты записывай как есть."""
+        }]
+    )
+
+    try:
+        import json as json_module
+        parsed = json_module.loads(parse_response.content[0].text.strip())
+        name = parsed.get("name", "").strip()
+        date_from = parsed.get("date_from", "").strip()
+        date_to = parsed.get("date_to", "").strip()
+        amount = int(parsed.get("amount", 0))
+
+        if not name or not amount:
+            await update.message.reply_text("Не удалось распознать. Пример:\n/balance Елена с 01.02 по 05.02 8000")
+            return
+
+        total = amount + DEPOSIT
         key = f"{name.lower()}_{date_from}"
         guest_balances[key] = {
             "name": name,
@@ -424,10 +442,8 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → сохранено")
 
-    except (ValueError, IndexError):
-        await update.message.reply_text(
-            "Формат: /balance имя | дата заезда | дата выезда | сумма"
-        )
+    except Exception as e:
+        await update.message.reply_text("Не удалось распознать. Пример:\n/balance Елена с 01.02 по 05.02 8000")
 
 
 async def remember(update: Update, context: ContextTypes.DEFAULT_TYPE):
