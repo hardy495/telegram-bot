@@ -366,7 +366,6 @@ async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Установить остаток по бронированию: /balance ФИО | дата_с | дата_по | сумма"""
     if not is_admin(update.effective_user):
         return
 
@@ -374,11 +373,8 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "|" not in full_text or full_text.count("|") < 3:
         await update.message.reply_text(
-            "Использование:\n"
-            "/balance ФИО | дата заезда | дата выезда | сумма\n\n"
-            "Пример:\n"
-            "/balance Иванов Иван Иванович | 27.06 | 30.06 | 3500\n\n"
-            "Последнее значение — сумма остатка по бронированию."
+            "Формат: /balance имя | дата заезда | дата выезда | сумма\n"
+            "Пример: /balance Елена | 27.06 | 30.06 | 3500"
         )
         return
 
@@ -400,25 +396,12 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "amount": amount
         }
 
-        await update.message.reply_text(
-            f"✅ Бронь добавлена:\n\n"
-            f"Гость: {name}\n"
-            f"Заезд: {date_from}\n"
-            f"Выезд: {date_to}\n"
-            f"Остаток: {amount} руб.\n"
-            f"Залог: {DEPOSIT} руб.\n"
-            f"Итого: {total} руб.\n\n"
-            f"Ищу гостя и отправляю реквизиты..."
-        )
-
-        # Ищем гостя в активных сессиях по схожести имени
+        # Ищем гостя в активных сессиях
         guest_id = None
-        best_match = None
         for saved_name, uid in guest_name_to_id.items():
-            # Проверяем любое пересечение слов между именами
             saved_words = set(saved_name.lower().split())
             new_words = set(name.lower().split())
-            if saved_words & new_words:  # есть общие слова
+            if saved_words & new_words:
                 guest_id = uid
                 break
 
@@ -437,17 +420,13 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.",
                 parse_mode="Markdown"
             )
-            await update.message.reply_text("✅ Реквизиты автоматически отправлены гостю!")
+            await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → отправлено гостю")
         else:
-            await update.message.reply_text(
-                "⚠️ Гость ещё не написал боту.\n"
-                "Бронь сохранена — как только напишет своё ФИО и даты, получит реквизиты автоматически."
-            )
+            await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → сохранено")
 
     except (ValueError, IndexError):
         await update.message.reply_text(
-            "Ошибка формата. Используйте:\n"
-            "/balance Иванов Иван | 27.06 | 30.06 | 3500"
+            "Формат: /balance имя | дата заезда | дата выезда | сумма"
         )
 
 
@@ -842,17 +821,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 balance_data = None
 
-        # Уведомляем админа
-        if ADMIN_CHAT_ID:
+        # Уведомляем админа только если бронь не найдена
+        if not balance_data and ADMIN_CHAT_ID:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
-                text=f"🆕 *Новый гость оформляется*\n\n"
-                     f"ФИО: {name}\n"
-                     f"Заезд: {date_from or 'не указан'}\n"
-                     f"Выезд: {date_to or 'не указан'}\n"
-                     f"ID: {user_id}\n\n"
-                     f"{'✅ Бронь найдена: ' + str(balance_data['amount']) + ' руб.' if balance_data else '⚠️ Бронь не найдена! Добавьте:'}\n"
-                     f"{'' if balance_data else f'`/balance {name} | {date_from} | {date_to} | СУММА`'}",
+                text=f"🆕 Новый гость: *{name}*\n"
+                     f"Заезд: {date_from or '?'} | Выезд: {date_to or '?'}\n\n"
+                     f"Бронь не найдена — внесите данные:\n"
+                     f"`/balance {name} | {date_from} | {date_to} | СУММА`",
                 parse_mode="Markdown"
             )
 
