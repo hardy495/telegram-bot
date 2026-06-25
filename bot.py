@@ -25,7 +25,8 @@ guest_extension_days = {}
 # Связь имя гостя -> user_id для автоматической отправки реквизитов
 guest_name_to_id = {}
 
-# Храним суммы остатков: имя гостя -> сумма остатка
+# Храним брони: ключ -> {name, date_from, date_to, amount}
+# Ключ: "имя_дата_заезда" для уникальности
 guest_balances = {}
 
 DEPOSIT = 2000
@@ -342,8 +343,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📄 *Фото паспорта* (лицевая сторона)\n"
         "💰 *Оплата:* остаток по бронированию + залог *2000 руб.*\n"
         "_(залог возвращается в день выезда до конца дня при отсутствии повреждений)_\n\n"
-        "Для начала напишите *ФИО* на кого оформлена бронь 👇\n\n"
-        "💬 _Если в процессе заселения или проживания возникнут любые вопросы — я всегда на связи и помогу разобраться!_",
+        "💬 _Если в процессе заселения или проживания возникнут вопросы — я всегда на связи!_\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Для начала укажите:\n"
+        "*ФИО* на кого оформлена бронь и *даты* заезда/выезда\n\n"
+        "_Например: Иванов Иван с 01.01 по 02.01_",
         parse_mode="Markdown"
     )
 
@@ -360,62 +364,90 @@ async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+
 async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Установить остаток по бронированию для гостя"""
+    """Установить остаток по бронированию: /balance ФИО | дата_с | дата_по | сумма"""
     if not is_admin(update.effective_user):
         return
-    if not context.args or len(context.args) < 2:
+
+    full_text = " ".join(context.args) if context.args else ""
+
+    if "|" not in full_text or full_text.count("|") < 3:
         await update.message.reply_text(
-            "Использование:\n/balance ФИО сумма\n\n"
-            "Пример:\n/balance Иванов Иван Иванович 3500\n\n"
-            "ФИО может быть несколько слов, последнее число — сумма остатка."
+            "Использование:\n"
+            "/balance ФИО | дата заезда | дата выезда | сумма\n\n"
+            "Пример:\n"
+            "/balance Иванов Иван Иванович | 27.06 | 30.06 | 3500\n\n"
+            "Последнее значение — сумма остатка по бронированию."
         )
         return
+
+    parts = [p.strip() for p in full_text.split("|")]
     try:
-        amount = int(context.args[-1])
-        name = " ".join(context.args[:-1]).strip()
-        name_lower = name.lower()
-        guest_balances[name_lower] = amount
+        name = parts[0].strip()
+        date_from = parts[1].strip()
+        date_to = parts[2].strip()
+        amount = int(parts[3].strip())
         total = amount + DEPOSIT
 
+        # Сохраняем бронь
+        key = f"{name.lower()}_{date_from}"
+        guest_balances[key] = {
+            "name": name,
+            "name_lower": name.lower(),
+            "date_from": date_from,
+            "date_to": date_to,
+            "amount": amount
+        }
+
         await update.message.reply_text(
-            f"✅ Остаток установлен:\n\n"
+            f"✅ Бронь добавлена:\n\n"
             f"Гость: {name}\n"
+            f"Заезд: {date_from}\n"
+            f"Выезд: {date_to}\n"
             f"Остаток: {amount} руб.\n"
             f"Залог: {DEPOSIT} руб.\n"
             f"Итого: {total} руб.\n\n"
-            f"Ищу гостя и отправляю ему реквизиты..."
+            f"Ищу гостя и отправляю реквизиты..."
         )
 
-        # Ищем гостя по имени в словаре
+        # Ищем гостя в активных сессиях
         guest_id = None
         for saved_name, uid in guest_name_to_id.items():
-            if name_lower in saved_name or saved_name in name_lower:
+            if name.lower() in saved_name or saved_name in name.lower():
                 guest_id = uid
                 break
 
         if guest_id:
+            guest_states[guest_id] = "waiting_passport"
             await context.bot.send_message(
                 chat_id=guest_id,
-                text=f"💰 *Информация об оплате готова!*\n\n"
-                     f"Для завершения оформления:\n\n"
+                text=f"✅ Нашли вашу бронь!\n\n"
+                     f"📅 Заезд: *{date_from}*, выезд: *{date_to}*\n\n"
+                     f"Для завершения оформления нам одновременно потребуется:\n\n"
+                     f"📄 *1. Фото паспорта* (лицевая сторона)\n\n"
+                     f"💰 *2. Оплата:*\n"
                      f"• Остаток по бронированию: *{amount} руб.*\n"
-                     f"• Залог: *{DEPOSIT} руб.* _(возвращается в день выезда до конца дня при отсутствии повреждений)_\n"
+                     f"• Залог: *{DEPOSIT} руб.* _(возвращается в день выезда до конца дня)_\n"
                      f"• *Итого: {total} руб.*\n\n"
                      f"Реквизиты для оплаты:\n{PAYMENT_INFO}\n\n"
-                     f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.\n"
-                     f"После оплаты пришлите чек в этот чат 🧾",
+                     f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.\n\n"
+                     f"Пришлите фото паспорта и чек об оплате одновременно 📄🧾",
                 parse_mode="Markdown"
             )
-            await update.message.reply_text(f"✅ Реквизиты автоматически отправлены гостю!")
+            await update.message.reply_text("✅ Реквизиты автоматически отправлены гостю!")
         else:
             await update.message.reply_text(
-                "⚠️ Гость ещё не написал боту или имя не совпало.\n"
-                "Сумма сохранена — гость получит реквизиты автоматически когда напишет своё ФИО."
+                "⚠️ Гость ещё не написал боту.\n"
+                "Бронь сохранена — как только напишет своё ФИО и даты, получит реквизиты автоматически."
             )
 
-    except ValueError:
-        await update.message.reply_text("Последним аргументом укажите сумму цифрами.\nПример: /balance Иванов Иван 3500")
+    except (ValueError, IndexError):
+        await update.message.reply_text(
+            "Ошибка формата. Используйте:\n"
+            "/balance Иванов Иван | 27.06 | 30.06 | 3500"
+        )
+
 
 async def remember(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user):
@@ -755,57 +787,110 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Гость — спрашиваем ФИО
+    # Гость — вводит ФИО и даты
     if state == "asking_name":
-        context.user_data["guest_name"] = user_text.strip()
-        guest_name_to_id[user_text.strip().lower()] = user_id
-        guest_states[user_id] = "waiting_passport"
+        raw = user_text.strip()
+        context.user_data["raw_booking"] = raw
 
-        # Ищем сумму по имени гостя
-        guest_name = user_text.strip().lower()
-        balance = None
-        for name_key, amount in guest_balances.items():
-            if name_key in guest_name or guest_name in name_key:
-                balance = amount
+        # Используем ИИ чтобы распознать ФИО и даты из произвольного текста
+        parse_response = claude.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": f"""Из текста извлеки ФИО и даты бронирования.
+Текст: "{raw}"
+
+Ответь строго в формате JSON без лишнего текста:
+{{"name": "ФИО", "date_from": "дата заезда", "date_to": "дата выезда"}}
+
+Если даты не указаны — верни пустую строку для дат.
+Даты записывай как есть из текста."""
+            }]
+        )
+
+        try:
+            import json as json_module
+            parsed = json_module.loads(parse_response.content[0].text.strip())
+            name = parsed.get("name", "").strip()
+            date_from = parsed.get("date_from", "").strip()
+            date_to = parsed.get("date_to", "").strip()
+        except:
+            name = raw
+            date_from = ""
+            date_to = ""
+
+        if not name:
+            await update.message.reply_text(
+                "Не удалось распознать ФИО. Пожалуйста, напишите в формате:\n\n"
+                "_Иванов Иван Иванович, с 27.06 по 30.06_",
+                parse_mode="Markdown"
+            )
+            return
+
+        context.user_data["guest_name"] = name
+        context.user_data["date_from"] = date_from
+        context.user_data["date_to"] = date_to
+        guest_name_to_id[name.lower()] = user_id
+
+        # Ищем бронь по имени и датам
+        balance_data = None
+        for key, data in guest_balances.items():
+            name_match = data["name_lower"] in name.lower() or name.lower() in data["name_lower"]
+            date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
+            if name_match and date_match:
+                balance_data = data
                 break
 
-        # Уведомляем админа о новом госте
+        # Уведомляем админа
         if ADMIN_CHAT_ID:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
                 text=f"🆕 *Новый гость оформляется*\n\n"
-                     f"ФИО: {user_text.strip()}\n"
+                     f"ФИО: {name}\n"
+                     f"Заезд: {date_from or 'не указан'}\n"
+                     f"Выезд: {date_to or 'не указан'}\n"
                      f"ID: {user_id}\n\n"
-                     f"{'✅ Сумма найдена: ' + str(balance) + ' руб.' if balance else '⚠️ Сумма не установлена! Используйте:'}\n"
-                     f"{'' if balance else f'`/balance {user_text.strip()} СУММА`'}",
+                     f"{'✅ Бронь найдена: ' + str(balance_data['amount']) + ' руб.' if balance_data else '⚠️ Бронь не найдена! Добавьте:'}\n"
+                     f"{'' if balance_data else f'`/balance {name} | {date_from} | {date_to} | СУММА`'}",
                 parse_mode="Markdown"
             )
 
-        if balance:
-            total = balance + DEPOSIT
+        if balance_data:
+            amount = balance_data["amount"]
+            total = amount + DEPOSIT
+            guest_states[user_id] = "waiting_passport"
             await update.message.reply_text(
-                f"Спасибо, {user_text.strip()}! 😊\n\n"
-                "Для завершения оформления нам одновременно потребуется:\n\n"
-                "📄 *1. Фото паспорта* (лицевая сторона)\n\n"
+                f"✅ Нашли вашу бронь!\n\n"
+                f"📅 Заезд: *{balance_data['date_from']}*, выезд: *{balance_data['date_to']}*\n\n"
+                f"Для завершения оформления нам одновременно потребуется:\n\n"
+                f"📄 *1. Фото паспорта* (лицевая сторона)\n\n"
                 f"💰 *2. Оплата:*\n"
-                f"• Остаток по бронированию: *{balance} руб.*\n"
-                f"• Залог: *{DEPOSIT} руб.* _(возвращается в день выезда до конца дня при отсутствии повреждений)_\n"
+                f"• Остаток по бронированию: *{amount} руб.*\n"
+                f"• Залог: *{DEPOSIT} руб.* _(возвращается в день выезда до конца дня)_\n"
                 f"• *Итого: {total} руб.*\n\n"
                 f"Реквизиты для оплаты:\n{PAYMENT_INFO}\n\n"
-                f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.\n"
-                
-                f"Пожалуйста, пришлите фото паспорта и чек об оплате 📄🧾",
+                f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.\n\n"
+                f"Пришлите фото паспорта и чек об оплате одновременно 📄🧾",
                 parse_mode="Markdown"
             )
         else:
+            guest_states[user_id] = "waiting_balance"
             await update.message.reply_text(
-                f"Спасибо, {user_text.strip()}! 😊\n\n"
-                "Для завершения оформления нам одновременно потребуется:\n\n"
-                "📄 *1. Фото паспорта* (лицевая сторона)\n\n"
-                "💰 *2. Оплата:* уточняем сумму у администратора — сообщим в течение 10 минут.\n\n"
-                "Пока пришлите фото паспорта 📄",
+                f"🔍 Бронирование на имя *{name}*"
+                f"{f' с {date_from} по {date_to}' if date_from else ''}"
+                f" не найдено в нашей системе.\n\n"
+                f"Пожалуйста, проверьте правильность ФИО и дат.\n"
+                f"Или подождите — уточним у администратора и свяжемся в течение 10 минут. ⏱",
                 parse_mode="Markdown"
             )
+        return
+
+    if state == "waiting_balance":
+        await update.message.reply_text(
+            "⏱ Уточняем информацию по вашему бронированию.\n"
+            "Ожидайте — свяжемся в течение 10 минут!"
+        )
         return
 
     if state == "waiting_passport":
@@ -833,8 +918,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Для оформления нам одновременно потребуется:\n\n"
             "📄 *Фото паспорта* (лицевая сторона)\n"
             "💰 *Оплата:* остаток по бронированию + залог *2000 руб.*\n\n"
-            "Для начала напишите *ФИО* на кого оформлена бронь 👇\n\n"
-            "💬 _Если в процессе заселения или проживания возникнут любые вопросы — я всегда на связи и помогу разобраться!_",
+            "💬 _Если возникнут вопросы — я всегда на связи!_\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Напишите имя на которое оформлена бронь и даты заезда/выезда 👇\n\n"
+            "_Например: Иванов Иван с 01.01 по 02.01_",
             parse_mode="Markdown"
         )
         return
