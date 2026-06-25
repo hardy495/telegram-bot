@@ -16,10 +16,17 @@ MEMORY_FILE = "memory.json"
 guest_states = {}
 conversation_history = {}
 pending_guest = {}
-
-# Храним: message_id уведомления -> guest_id
-# Чтобы когда админ делает Reply — знать кому отвечать
 notification_to_guest = {}
+time_request_to_guest = {}
+
+# Храним суммы остатков: имя гостя -> сумма остатка
+guest_balances = {}
+
+DEPOSIT = 2000
+
+PAYMENT_INFO = """+79181180045
+СБЕРБАНК, Т-БАНК
+Получатель: Антон Анатольевич А."""
 
 def load_memory():
     if os.path.exists(MEMORY_FILE):
@@ -35,74 +42,158 @@ def get_all_knowledge():
     memory = load_memory()
     text = ""
     if memory["objects"]:
-        text += "=== ОБЪЕКТЫ ===\n"
+        text += "=== АПАРТАМЕНТЫ ===\n"
         for name, info in memory["objects"].items():
             text += f"\n--- {name} ---\n{info}\n"
     if memory["notes"]:
-        text += "\n=== ЗАМЕТКИ И НЮАНСЫ ===\n"
+        text += "\n=== ЗАМЕТКИ ===\n"
         for i, note in enumerate(memory["notes"], 1):
             text += f"{i}. {note}\n"
     return text if text else "База знаний пока пуста."
 
 SYSTEM_PROMPT = """Ты вежливый и профессиональный помощник для гостей апартаментов Alekseev Apartments.
 
-Вот вся информация которую ты знаешь:
+Вот информация которую ты знаешь:
 {knowledge}
 
-Правила:
+=== ПРАВИЛА КОМПАНИИ ===
+- Заселение дистанционное — гость заселяется самостоятельно через минисейф
+- Пароль от минисейфа, домофона и другая информация придёт после подтверждения оплаты
+- Стандартное время заезда: с 14:00
+- Стандартное время выезда: до 12:00
+- Ранний заезд (до 14:00): доплата 400 рублей за каждый час. Возможность зависит от занятости — нужно уточнять.
+- Поздний выезд (после 12:00): доплата 400 рублей за каждый час. Возможность зависит от занятости — нужно уточнять.
+- Залог 2000 рублей возвращается в день выезда до конца дня при отсутствии повреждений.
+
+=== ОСНАЩЕНИЕ ВСЕХ АПАРТАМЕНТОВ ===
+Во всех наших апартаментах есть:
+- Утюг и гладильная доска
+- Полотенца (для каждого гостя)
+- Постельное бельё (чистое, заправлено)
+- Фен
+- Гель для душа
+
+Если гость спрашивает об этих вещах — уверенно отвечай что всё это есть в апартаменте.
+
+
 - Отвечай только на русском языке
 - Будь вежлив и дружелюбен
-- Используй только информацию из базы знаний
+- Используй только информацию из базы знаний и правил компании
 - Не придумывай то чего нет в базе
 
-Если не можешь ответить — верни ровно: [НУЖЕН_ОПЕРАТОР]
+Если гость спрашивает про ранний заезд — верни ровно: [РАННИЙ_ЗАЕЗД]
+Если гость спрашивает про поздний выезд — верни ровно: [ПОЗДНИЙ_ВЫЕЗД]
+Если не можешь ответить на вопрос — верни ровно: [НУЖЕН_ОПЕРАТОР]
 """
 
 def is_admin(user):
     return user.username and f"@{user.username}".lower() == ADMIN_USERNAME.lower()
 
 async def notify_admin_question(context, question, user):
-    """Уведомить админа о вопросе гостя и сохранить связь message_id -> guest_id"""
     if not ADMIN_CHAT_ID:
         return
     username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user.id})"
     msg = await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=f"❓ *Вопрос от гостя {username}:*\n\n{question}\n\n"
-             f"_Нажмите Reply на это сообщение и напишите ответ — он автоматически уйдёт гостю_",
+             f"_Нажмите Reply и напишите ответ — он уйдёт гостю автоматически_",
         parse_mode="Markdown"
     )
-    # Сохраняем связь: message_id -> guest user_id
     notification_to_guest[msg.message_id] = user.id
 
-async def analyze_photo_with_ai(photo_bytes: bytes, expected_type: str) -> tuple[bool, str]:
-    image_data = base64.standard_b64encode(photo_bytes).decode("utf-8")
-    if expected_type == "passport":
-        prompt = """Внимательно посмотри на это изображение. 
-        Это паспорт или документ удостоверяющий личность? 
-        Ответь только: ДА если это паспорт/удостоверение личности, или НЕТ если это что-то другое.
-        После ДА или НЕТ напиши через | краткое объяснение на русском."""
-    else:
-        prompt = """Внимательно посмотри на это изображение.
-        Это чек об оплате, квитанция или подтверждение платежа?
-        Ответь только: ДА если это чек/квитанция/подтверждение оплаты, или НЕТ если это что-то другое.
-        После ДА или НЕТ напиши через | краткое объяснение на русском."""
-
-    response = claude.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=200,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
-                {"type": "text", "text": prompt}
-            ]
-        }]
+async def notify_admin_time_request(context, user, request_type, time_str, hours, amount):
+    if not ADMIN_CHAT_ID:
+        return
+    username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user.id})"
+    type_text = "ранний заезд" if request_type == "early" else "поздний выезд"
+    msg = await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"🕐 *Запрос на {type_text}*\n\n"
+             f"Гость: {username}\n"
+             f"Время: {time_str}\n"
+             f"Часов: {hours}\n"
+             f"Сумма доплаты: {amount} руб.\n\n"
+             f"*Ответьте Reply: ДА или НЕТ*",
+        parse_mode="Markdown"
     )
-    result = response.content[0].text.strip()
-    is_valid = result.upper().startswith("ДА")
-    explanation = result.split("|")[1].strip() if "|" in result else ""
-    return is_valid, explanation
+    time_request_to_guest[msg.message_id] = {
+        "guest_id": user.id,
+        "hours": hours,
+        "amount": amount,
+        "type": request_type,
+        "time": time_str
+    }
+
+async def analyze_photo_with_ai(photo_bytes: bytes, expected_type: str, expected_amount: int = None) -> tuple[bool, str]:
+    """
+    Анализирует фото через Claude Vision.
+    Возвращает (is_valid, message)
+    """
+    image_data = base64.standard_b64encode(photo_bytes).decode("utf-8")
+
+    if expected_type == "passport":
+        prompt = "Это паспорт или удостоверение личности? Ответь только ДА или НЕТ."
+        response = claude.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=10,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
+                    {"type": "text", "text": prompt}
+                ]
+            }]
+        )
+        is_valid = response.content[0].text.strip().upper().startswith("ДА")
+        return is_valid, ""
+
+    else:
+        # Проверяем чек и сумму
+        if expected_amount:
+            prompt = f"""Внимательно посмотри на этот чек или подтверждение платежа.
+
+1. Это чек об оплате, квитанция или подтверждение платежа? 
+2. Если да — найди сумму перевода в документе.
+3. Сравни с ожидаемой суммой: {expected_amount} рублей.
+
+Ответь строго в формате:
+ЧЕК: ДА или НЕТ
+СУММА: (напиши найденную сумму цифрами, или НЕИЗВЕСТНО если не видно)
+СОВПАДАЕТ: ДА или НЕТ или НЕИЗВЕСТНО"""
+        else:
+            prompt = """Это чек об оплате, квитанция или подтверждение платежа? 
+Ответь строго в формате:
+ЧЕК: ДА или НЕТ
+СУММА: (напиши найденную сумму цифрами, или НЕИЗВЕСТНО если не видно)
+СОВПАДАЕТ: НЕИЗВЕСТНО"""
+
+        response = claude.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
+                    {"type": "text", "text": prompt}
+                ]
+            }]
+        )
+        result = response.content[0].text.strip()
+
+        is_check = "ЧЕК: ДА" in result.upper()
+        if not is_check:
+            return False, "not_a_check"
+
+        # Проверяем совпадение суммы
+        if expected_amount and "СОВПАДАЕТ: НЕТ" in result.upper():
+            # Извлекаем найденную сумму
+            found_amount = "неизвестна"
+            for line in result.split("\n"):
+                if "СУММА:" in line.upper():
+                    found_amount = line.split(":")[-1].strip()
+            return False, f"wrong_amount:{found_amount}"
+
+        return True, "ok"
 
 async def send_apartment_buttons(context, chat_id, guest_id, guest_name):
     memory = load_memory()
@@ -120,7 +211,7 @@ async def send_apartment_buttons(context, chat_id, guest_id, guest_name):
     keyboard = InlineKeyboardMarkup(buttons)
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"✅ Документы гостя {guest_name} проверены!\n\nВыберите апартамент:",
+        text=f"✅ Оплата от гостя {guest_name} подтверждена!\n\nВыберите апартамент для отправки информации о заселении:",
         reply_markup=keyboard
     )
 
@@ -155,6 +246,26 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
     )
     del pending_guest[admin_chat_id]
 
+async def ask_guest_time(update, request_type):
+    if request_type == "early":
+        await update.message.reply_text(
+            "🕐 *Ранний заезд*\n\n"
+            "Стандартное время заезда — с 14:00.\n"
+            "Ранний заезд возможен за доплату *400 рублей за каждый час* до 14:00.\n\n"
+            "Укажите, пожалуйста, со скольки вы хотели бы заехать?\n"
+            "_(например: с 11:00)_",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            "🕐 *Поздний выезд*\n\n"
+            "Стандартное время выезда — до 12:00.\n"
+            "Поздний выезд возможен за доплату *400 рублей за каждый час* после 12:00.\n\n"
+            "Укажите, пожалуйста, до скольки вы хотели бы выехать?\n"
+            "_(например: до 15:00)_",
+            parse_mode="Markdown"
+        )
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_admin(update.effective_user):
@@ -162,25 +273,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Привет! Вы вошли как администратор 👋\n\n"
             "Команды:\n"
             "/admin — активировать уведомления\n"
-            "/remember [текст] — запомнить информацию\n"
-            "/add [название] | [инфо] — добавить апартамент\n"
+            "/balance ФИО сумма — установить остаток по бронированию\n"
+            "/remember текст — запомнить информацию\n"
+            "/add название | инфо — добавить апартамент\n"
             "/list — база знаний\n"
-            "/delnote [номер] — удалить заметку\n"
-            "/delobj [название] — удалить апартамент\n\n"
-            "💡 Когда гость задаёт вопрос которого нет в базе — бот пришлёт его сюда. "
-            "Нажмите *Reply* на сообщение и напишите ответ — он уйдёт гостю автоматически.",
+            "/delnote номер — удалить заметку\n"
+            "/delobj название — удалить апартамент\n\n"
+            "💡 На вопросы гостей отвечайте через *Reply*.",
             parse_mode="Markdown"
         )
         return
-    guest_states[user_id] = "waiting_passport"
+    guest_states[user_id] = "asking_name"
     conversation_history[user_id] = []
     await update.message.reply_text(
-        "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
-        "Я помогу вам с заселением и отвечу на все вопросы.\n\n"
-        "Для начала нам необходимо верифицировать вас:\n"
-        "1️⃣ Фото паспорта (лицевая сторона)\n"
-        "2️⃣ Чек об оплате\n\n"
-        "Пожалуйста, пришлите фото паспорта 📄"
+        "Здравствуйте! 👋 Добро пожаловать в *Alekseev Apartments!*\n\n"
+        "Рады вас приветствовать! 🏠\n\n"
+        "Обратите внимание: у нас *дистанционное заселение* — вы сможете заехать самостоятельно "
+        "через минисейф. Все необходимые пароли и инструкции вы получите после подтверждения оплаты.\n\n"
+        "Для оформления заселения нам потребуется:\n"
+        "1️⃣ Ваше ФИО (на кого оформлена бронь)\n"
+        "2️⃣ Количество суток проживания\n"
+        "3️⃣ Фото паспорта (лицевая сторона)\n"
+        "4️⃣ Оплата остатка по бронированию + залог 2000 руб.\n\n"
+        "Для начала, пожалуйста, напишите *ФИО* на кого оформлена бронь 👇",
+        parse_mode="Markdown"
     )
 
 async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,10 +306,36 @@ async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ADMIN_CHAT_ID = str(update.effective_chat.id)
     await update.message.reply_text(
         "✅ Уведомления активированы!\n\n"
-        "Теперь когда гость задаёт сложный вопрос — бот пришлёт его сюда.\n"
-        "Нажмите *Reply* и напишите ответ — он уйдёт гостю автоматически! 👌",
+        "Когда гость задаёт вопрос — бот пришлёт уведомление.\n"
+        "Нажмите *Reply* и напишите ответ — он уйдёт гостю! 👌",
         parse_mode="Markdown"
     )
+
+async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Установить остаток по бронированию для гостя"""
+    if not is_admin(update.effective_user):
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Использование:\n/balance ФИО сумма\n\n"
+            "Пример:\n/balance Иванов Иван Иванович 3500\n\n"
+            "ФИО может быть несколько слов, последнее число — сумма остатка."
+        )
+        return
+    try:
+        amount = int(context.args[-1])
+        name = " ".join(context.args[:-1]).strip().lower()
+        guest_balances[name] = amount
+        total = amount + DEPOSIT
+        await update.message.reply_text(
+            f"✅ Остаток по бронированию установлен:\n\n"
+            f"Гость: {' '.join(context.args[:-1])}\n"
+            f"Остаток по бронированию: {amount} руб.\n"
+            f"Залог: {DEPOSIT} руб.\n"
+            f"Итого к оплате: {total} руб."
+        )
+    except ValueError:
+        await update.message.reply_text("Последним аргументом укажите сумму цифрами.\nПример: /balance Иванов Иван 3500")
 
 async def remember(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user):
@@ -213,8 +355,7 @@ async def add_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Использование:\n/add Название | Информация\n\n"
-            "Пример:\n/add Апартамент №1 | Адрес: ул. Ленина 5, кв.10. Код домофона: 1234. "
-            "WiFi: MyHome, пароль: 12345678. Заселение с 14:00, выезд до 12:00."
+            "Пример:\n/add Апартамент №1 | Адрес: ул. Ленина 5, кв.10. Код домофона: 1234. Минисейф: код 5678. WiFi: MyHome, пароль: 12345678. Заселение с 14:00, выезд до 12:00."
         )
         return
     full_text = " ".join(context.args)
@@ -244,6 +385,10 @@ async def list_knowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"{i}. {note}\n"
     else:
         text += "\n📝 Заметки: пусто\n"
+    if guest_balances:
+        text += "\n💰 *Остатки по бронированию:*\n"
+        for name, amount in guest_balances.items():
+            text += f"• {name}: {amount} руб.\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def delete_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -289,7 +434,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Спасибо за фото! Если есть вопросы — задавайте 😊")
         return
 
-    await update.message.reply_text("🔍 Проверяю документ...")
+    await update.message.reply_text("🔍 Проверяю документ, подождите...")
     photo = update.message.photo[-1]
     photo_file = await context.bot.get_file(photo.file_id)
     photo_bytes = await photo_file.download_as_bytearray()
@@ -300,7 +445,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ Это не похоже на паспорт.\n\n"
                 "Пожалуйста, пришлите фото *лицевой стороны паспорта* 📄\n\n"
-                "Убедитесь что:\n• Фото чёткое\n• Видны все данные\n• Это именно паспорт",
+                "Убедитесь что:\n• Фото чёткое и хорошо освещено\n• Видны все данные\n• Это именно паспорт",
                 parse_mode="Markdown"
             )
             return
@@ -316,17 +461,90 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=update.message.message_id
             )
         guest_states[user_id] = "waiting_payment"
-        await update.message.reply_text("✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾")
 
-    elif state == "waiting_payment":
-        is_valid, _ = await analyze_photo_with_ai(bytes(photo_bytes), "payment")
-        if not is_valid:
+        # Ищем сумму по имени гостя
+        guest_name = context.user_data.get("guest_name", "").lower()
+        balance = None
+        for name_key, amount in guest_balances.items():
+            if name_key in guest_name or guest_name in name_key:
+                balance = amount
+                break
+
+        if balance is not None:
+            total = balance + DEPOSIT
             await update.message.reply_text(
-                "❌ Это не похоже на чек об оплате.\n\n"
-                "Пришлите *чек или подтверждение оплаты* 🧾\n\n"
-                "Это может быть:\n• Скриншот из банка\n• Фото бумажного чека\n• Подтверждение перевода",
+                "✅ Паспорт принят, спасибо!\n\n"
+                f"💰 *Для завершения оформления необходимо оплатить:*\n\n"
+                f"• Остаток по бронированию: *{balance} руб.*\n"
+                f"• Залог: *{DEPOSIT} руб.* _(возвращается в день выезда до конца дня при отсутствии повреждений)_\n"
+                f"• *Итого: {total} руб.*\n\n"
+                f"Реквизиты для оплаты:\n{PAYMENT_INFO}\n\n"
+                f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.\n"
+                f"После оплаты пришлите чек и напишите ваше ФИО на номер +79181180045.",
                 parse_mode="Markdown"
             )
+        else:
+            await update.message.reply_text(
+                "✅ Паспорт принят, спасибо!\n\n"
+                "Сейчас уточню сумму остатка по вашей брони у администратора и сообщу вам в течение 10 минут. ⏱"
+            )
+            if ADMIN_CHAT_ID:
+                msg = await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=f"⚠️ *Не найдена сумма для гостя!*\n\n"
+                         f"Гость: {username}\n"
+                         f"ФИО: {context.user_data.get('guest_name', 'не указано')}\n"
+                         f"Ночей: {context.user_data.get('nights', 'не указано')}\n\n"
+                         f"Установите сумму командой:\n"
+                         f"`/balance {context.user_data.get('guest_name', 'ФИО')} СУММА`",
+                    parse_mode="Markdown"
+                )
+
+    elif state == "waiting_payment":
+        # Получаем ожидаемую сумму
+        guest_name = context.user_data.get("guest_name", "").lower()
+        expected_amount = None
+        for name_key, amount in guest_balances.items():
+            if name_key in guest_name or guest_name in name_key:
+                expected_amount = amount + DEPOSIT
+                break
+
+        is_valid, reason = await analyze_photo_with_ai(bytes(photo_bytes), "payment", expected_amount)
+
+        if not is_valid:
+            if reason == "not_a_check":
+                await update.message.reply_text(
+                    "❌ Это не похоже на чек об оплате.\n\n"
+                    "Пришлите *чек или подтверждение оплаты* 🧾\n\n"
+                    "Это может быть:\n• Скриншот из банка\n• Фото бумажного чека\n• Подтверждение перевода",
+                    parse_mode="Markdown"
+                )
+            elif reason.startswith("wrong_amount"):
+                found = reason.split(":")[-1]
+                # Пересылаем чек администратору с пометкой
+                if ADMIN_CHAT_ID:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=f"⚠️ *Несовпадение суммы в чеке!*\n\n"
+                             f"Гость: {username} (ID: {user_id})\n"
+                             f"ФИО: {context.user_data.get('guest_name', 'не указано')}\n"
+                             f"Сумма в чеке: *{found} руб.*\n"
+                             f"Ожидаемая сумма: *{expected_amount} руб.*\n\n"
+                             f"Чек гостя 👇",
+                        parse_mode="Markdown"
+                    )
+                    await context.bot.forward_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        from_chat_id=update.effective_chat.id,
+                        message_id=update.message.message_id
+                    )
+                # Гостю сообщаем что документы на проверке
+                await update.message.reply_text(
+                    "⚠️ *Сумма в чеке не совпадает с указанной.*\n\n"
+                    "Чек передан администратору на проверку.\n"
+                    "Мы свяжемся с вами в течение 10 минут. ⏱",
+                    parse_mode="Markdown"
+                )
             return
         if ADMIN_CHAT_ID:
             await context.bot.send_message(
@@ -342,9 +560,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guest_states[user_id] = "waiting_admin_confirmation"
         await update.message.reply_text(
             "✅ Чек получен!\n\n"
-            "Документы переданы на проверку. "
-            "Как только оплата подтверждена — вы получите всю информацию о заселении.\n\n"
-            "⏱ Обычно это занимает не более 10 минут."
+            "Документы переданы на проверку оплаты.\n"
+            "⏱ Обычно это занимает не более 10 минут.\n\n"
+            "Пока ждёте — если есть вопросы, я готов помочь! 😊"
         )
         if ADMIN_CHAT_ID:
             await send_apartment_buttons(context, ADMIN_CHAT_ID, user_id, username)
@@ -355,34 +573,97 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     state = guest_states.get(user_id)
 
-    # Если это админ отвечает через Reply на вопрос гостя
+    # Если админ отвечает через Reply
     if is_admin(user):
         reply_to = update.message.reply_to_message
-        if reply_to and reply_to.message_id in notification_to_guest:
-            guest_id = notification_to_guest[reply_to.message_id]
-            await context.bot.send_message(
-                chat_id=guest_id,
-                text=f"💬 *Ответ оператора:*\n\n{user_text}",
-                parse_mode="Markdown"
-            )
-            await update.message.reply_text("✅ Ответ отправлен гостю!")
-            return
-        # Обычное сообщение от админа
+        if reply_to:
+            if reply_to.message_id in time_request_to_guest:
+                data = time_request_to_guest[reply_to.message_id]
+                guest_id = data["guest_id"]
+                answer = user_text.strip().upper()
+                if answer == "ДА":
+                    type_text = "Ранний заезд" if data["type"] == "early" else "Поздний выезд"
+                    await context.bot.send_message(
+                        chat_id=guest_id,
+                        text=f"✅ *{type_text} согласован!*\n\n"
+                             f"Время: {data['time']}\n"
+                             f"Количество часов: {data['hours']}\n"
+                             f"Сумма доплаты: *{data['amount']} рублей*\n\n"
+                             f"Для оплаты доплаты переведите сумму:\n\n"
+                             f"{PAYMENT_INFO}\n\n"
+                             f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.\n"
+                             f"После оплаты пришлите чек и напишите ваше ФИО на номер +79181180045.",
+                        parse_mode="Markdown"
+                    )
+                    await update.message.reply_text("✅ Гость уведомлён и получил реквизиты!")
+                elif answer == "НЕТ":
+                    type_text = "ранний заезд" if data["type"] == "early" else "поздний выезд"
+                    await context.bot.send_message(
+                        chat_id=guest_id,
+                        text=f"😔 К сожалению, {type_text} на {data['time']} "
+                             f"в данный момент невозможен — апартамент занят.\n\n"
+                             f"Стандартное время {'заезда с 14:00' if data['type'] == 'early' else 'выезда до 12:00'}.\n\n"
+                             f"Если есть другие вопросы — готов помочь! 😊"
+                    )
+                    await update.message.reply_text("✅ Гость уведомлён об отказе.")
+                else:
+                    await update.message.reply_text("Пожалуйста ответьте *ДА* или *НЕТ*", parse_mode="Markdown")
+                return
+
+            if reply_to.message_id in notification_to_guest:
+                guest_id = notification_to_guest[reply_to.message_id]
+                await context.bot.send_message(
+                    chat_id=guest_id,
+                    text=f"💬 *Ответ оператора:*\n\n{user_text}",
+                    parse_mode="Markdown"
+                )
+                await update.message.reply_text("✅ Ответ отправлен гостю!")
+                return
+
         await update.message.reply_text(
-            "Привет! Команды:\n"
+            "Команды:\n"
             "/admin — активировать уведомления\n"
-            "/remember [текст] — запомнить информацию\n"
-            "/add [название] | [инфо] — добавить апартамент\n"
+            "/balance ФИО сумма — установить остаток по брони\n"
+            "/remember текст — запомнить информацию\n"
+            "/add название | инфо — добавить апартамент\n"
             "/list — база знаний\n"
-            "/delnote [номер] — удалить заметку\n"
-            "/delobj [название] — удалить апартамент"
+            "/delnote номер — удалить заметку\n"
+            "/delobj название — удалить апартамент"
         )
         return
 
-    if state is None:
-        guest_states[user_id] = "waiting_passport"
+    # Гость — спрашиваем ФИО
+    if state == "asking_name":
+        context.user_data["guest_name"] = user_text.strip()
+        guest_states[user_id] = "asking_nights"
         await update.message.reply_text(
-            "Здравствуйте! 👋\n\nДля начала пришлите фото паспорта (лицевая сторона) 📄"
+            f"Спасибо, {user_text.strip()}! 😊\n\n"
+            "На сколько суток у вас оформлена бронь?"
+        )
+        return
+
+    # Спрашиваем количество ночей
+    if state == "asking_nights":
+        context.user_data["nights"] = user_text.strip()
+        guest_states[user_id] = "waiting_passport"
+
+        # Уведомляем админа о новом госте
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"🆕 *Новый гость оформляется*\n\n"
+                     f"ФИО: {context.user_data.get('guest_name')}\n"
+                     f"Ночей: {user_text.strip()}\n"
+                     f"ID: {user_id}\n\n"
+                     f"Если сумма ещё не установлена — используйте:\n"
+                     f"`/balance {context.user_data.get('guest_name')} СУММА`",
+                parse_mode="Markdown"
+            )
+
+        await update.message.reply_text(
+            f"Отлично! Бронь на *{user_text.strip()} {('сутки' if user_text.strip() in ['2','3','4'] else 'суток') if user_text.strip().isdigit() else 'суток'}*.\n\n"
+            "Теперь пришлите, пожалуйста, фото *лицевой стороны паспорта* 📄",
+            parse_mode="Markdown"
         )
         return
 
@@ -394,19 +675,68 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пожалуйста, пришлите чек об оплате 🧾")
         return
 
-    if state == "waiting_admin_confirmation":
+    # Гость может задавать вопросы на любом этапе после ФИО
+    if state in [None]:
+        guest_states[user_id] = "asking_name"
+        conversation_history[user_id] = []
         await update.message.reply_text(
-            "⏱ Ваши документы на проверке.\n"
-            "Оператор подтвердит оплату в течение 10 минут."
+            "Здравствуйте! 👋 Добро пожаловать в *Alekseev Apartments!*\n\n"
+            "Для оформления заселения напишите, пожалуйста, ваше *ФИО* 👇",
+            parse_mode="Markdown"
         )
         return
 
-    # Верифицированный гость — отвечаем через Claude
+    # Проверяем запрос на время
+    if guest_states.get(user_id) == "waiting_time_early":
+        time_str = user_text.strip()
+        try:
+            hour = int(time_str.replace(":", "").replace("с ", "").replace(" ", "")[:2])
+            hours = 14 - hour
+            if hours <= 0:
+                await update.message.reply_text("Укажите время до 14:00. _(например: с 11:00)_", parse_mode="Markdown")
+                return
+            amount = hours * 400
+            await notify_admin_time_request(context, user, "early", time_str, hours, amount)
+            await update.message.reply_text(
+                f"Вы хотите заехать в *{time_str}*.\n\n"
+                f"Часов раннего заезда: *{hours} ч.*\n"
+                f"Сумма доплаты: *{amount} рублей*\n\n"
+                f"Уточняю возможность у администратора — отвечу в течение 10 минут! ⏱",
+                parse_mode="Markdown"
+            )
+        except:
+            await notify_admin_time_request(context, user, "early", time_str, 0, 0)
+            await update.message.reply_text(f"Запрос на ранний заезд ({time_str}) передан администратору. Ответим в течение 10 минут! ⏱")
+        guest_states[user_id] = "verified"
+        return
+
+    if guest_states.get(user_id) == "waiting_time_late":
+        time_str = user_text.strip()
+        try:
+            hour = int(time_str.replace(":", "").replace("до ", "").replace(" ", "")[:2])
+            hours = hour - 12
+            if hours <= 0:
+                await update.message.reply_text("Укажите время после 12:00. _(например: до 15:00)_", parse_mode="Markdown")
+                return
+            amount = hours * 400
+            await notify_admin_time_request(context, user, "late", time_str, hours, amount)
+            await update.message.reply_text(
+                f"Вы хотите выехать в *{time_str}*.\n\n"
+                f"Часов позднего выезда: *{hours} ч.*\n"
+                f"Сумма доплаты: *{amount} рублей*\n\n"
+                f"Уточняю возможность у администратора — отвечу в течение 10 минут! ⏱",
+                parse_mode="Markdown"
+            )
+        except:
+            await notify_admin_time_request(context, user, "late", time_str, 0, 0)
+            await update.message.reply_text(f"Запрос на поздний выезд ({time_str}) передан администратору. Ответим в течение 10 минут! ⏱")
+        guest_states[user_id] = "verified"
+        return
+
     if user_id not in conversation_history:
         conversation_history[user_id] = []
 
     conversation_history[user_id].append({"role": "user", "content": user_text})
-
     if len(conversation_history[user_id]) > 20:
         conversation_history[user_id] = conversation_history[user_id][-20:]
 
@@ -416,10 +746,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system=SYSTEM_PROMPT.format(knowledge=get_all_knowledge()),
         messages=conversation_history[user_id]
     )
-
     reply = response.content[0].text
 
-    if "[НУЖЕН_ОПЕРАТОР]" in reply:
+    if "[РАННИЙ_ЗАЕЗД]" in reply:
+        guest_states[user_id] = "waiting_time_early"
+        await ask_guest_time(update, "early")
+    elif "[ПОЗДНИЙ_ВЫЕЗД]" in reply:
+        guest_states[user_id] = "waiting_time_late"
+        await ask_guest_time(update, "late")
+    elif "[НУЖЕН_ОПЕРАТОР]" in reply:
         await notify_admin_question(context, user_text, user)
         await update.message.reply_text(
             "Спасибо за ваш вопрос! 🙏\n\n"
@@ -433,6 +768,7 @@ app = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", set_admin_id))
+app.add_handler(CommandHandler("balance", set_balance))
 app.add_handler(CommandHandler("remember", remember))
 app.add_handler(CommandHandler("add", add_object))
 app.add_handler(CommandHandler("list", list_knowledge))
