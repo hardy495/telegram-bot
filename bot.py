@@ -262,33 +262,64 @@ async def send_apartment_buttons(context, chat_id, guest_id, guest_name):
 async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not query.data.startswith("apt_"):
-        return
-    apt_name = query.data[4:]
-    admin_chat_id = str(query.message.chat_id)
-    guest_id = pending_guest.get(admin_chat_id)
-    if not guest_id:
-        await query.edit_message_text("❌ Не удалось найти гостя.")
-        return
-    memory = load_memory()
-    apt_info = memory["objects"].get(apt_name)
-    if not apt_info:
-        await query.edit_message_text(f"❌ Апартамент '{apt_name}' не найден.")
-        return
-    await context.bot.send_message(
-        chat_id=guest_id,
-        text=f"✅ Ваша оплата подтверждена!\n\n"
-             f"🏠 *{apt_name}*\n\n{apt_info}\n\n"
-             f"Если возникнут вопросы — я всегда готов помочь! 😊",
-        parse_mode="Markdown"
-    )
-    guest_states[guest_id] = "verified"
-    conversation_history[guest_id] = []
-    await query.edit_message_text(
-        f"✅ Информация по *{apt_name}* отправлена гостю!",
-        parse_mode="Markdown"
-    )
-    del pending_guest[admin_chat_id]
+
+    # Кнопка "Получил" — показываем список апартаментов
+    if query.data.startswith("received_"):
+        guest_id = int(query.data.split("_")[1])
+        admin_chat_id = str(query.message.chat_id)
+        pending_guest[admin_chat_id] = guest_id
+
+        memory = load_memory()
+        objects = memory.get("objects", {})
+        if not objects:
+            await query.edit_message_text("⚠️ База апартаментов пуста! Добавьте через /add")
+            return
+
+        buttons = []
+        for name in objects.keys():
+            buttons.append([InlineKeyboardButton(f"🏠 {name}", callback_data=f"apt_{name}")])
+        keyboard = InlineKeyboardMarkup(buttons)
+        await query.edit_message_text(
+            "✅ Оплата получена!\n\nВыберите апартамент для отправки гостю:",
+            reply_markup=keyboard
+        )
+
+    # Кнопка "Не получил"
+    elif query.data.startswith("not_received_"):
+        guest_id = int(query.data.split("_")[2])
+        await context.bot.send_message(
+            chat_id=guest_id,
+            text="⚠️ Оплата не поступила.\n\n"
+                 "Пожалуйста, проверьте правильность перевода и пришлите чек повторно.\n\n"
+                 f"Реквизиты для оплаты:\n{PAYMENT_INFO}\n\n"
+                 "⚠️ При переводе *ничего не пишите* в комментарии к платежу.",
+            parse_mode="Markdown"
+        )
+        guest_states[guest_id] = "waiting_payment"
+        await query.edit_message_text("❌ Гость уведомлён — оплата не поступила.")
+
+    # Выбор апартамента
+    elif query.data.startswith("apt_"):
+        apt_name = query.data[4:]
+        admin_chat_id = str(query.message.chat_id)
+        guest_id = pending_guest.get(admin_chat_id)
+        if not guest_id:
+            await query.edit_message_text("❌ Не удалось найти гостя.")
+            return
+        memory = load_memory()
+        apt_info = memory["objects"].get(apt_name)
+        if not apt_info:
+            await query.edit_message_text(f"❌ Апартамент '{apt_name}' не найден.")
+            return
+        await context.bot.send_message(
+            chat_id=guest_id,
+            text=f"✅ Ваша оплата подтверждена!\n\n{apt_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊",
+            parse_mode="Markdown"
+        )
+        guest_states[guest_id] = "verified"
+        conversation_history[guest_id] = []
+        await query.edit_message_text(f"✅ Информация по *{apt_name}* отправлена гостю!", parse_mode="Markdown")
+        del pending_guest[admin_chat_id]
 
 async def ask_guest_time(update, request_type):
     if request_type == "early":
@@ -654,6 +685,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from_chat_id=update.effective_chat.id,
                 message_id=update.message.message_id
             )
+            # Кнопки "Получил" / "Не получил"
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
+                    InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
+                ]
+            ])
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"Оплата от гостя {username} получена?",
+                reply_markup=keyboard
+            )
         guest_states[user_id] = "waiting_admin_confirmation"
         await update.message.reply_text(
             "✅ Чек получен!\n\n"
@@ -661,8 +704,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏱ Обычно это занимает не более 10 минут.\n\n"
             "Пока ждёте — если есть вопросы, я готов помочь! 😊"
         )
-        if ADMIN_CHAT_ID:
-            await send_apartment_buttons(context, ADMIN_CHAT_ID, user_id, username)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
