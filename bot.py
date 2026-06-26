@@ -693,6 +693,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         from_chat_id=update.effective_chat.id,
                         message_id=update.message.message_id
                     )
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
+                            InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
+                        ]
+                    ])
+                    await context.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text="Подтвердите получение оплаты:",
+                        reply_markup=keyboard
+                    )
+                guest_states[user_id] = "waiting_admin_confirmation"
                 await update.message.reply_text(
                     "⚠️ Сумма в чеке не совпадает с запрошенной.\n\n"
                     "Чек передан администратору на проверку.\n"
