@@ -250,12 +250,13 @@ async def send_apartment_buttons(context, chat_id, guest_id, guest_name):
         return
     pending_guest[str(chat_id)] = guest_id
     buttons = []
-    for name in objects.keys():
-        buttons.append([InlineKeyboardButton(f"🏠 {name}", callback_data=f"apt_{name}")])
+    for i, name in enumerate(objects.keys()):
+        # Используем индекс вместо названия чтобы не превышать лимит 64 байта
+        buttons.append([InlineKeyboardButton(f"🏠 {name}", callback_data=f"apt_{i}")])
     keyboard = InlineKeyboardMarkup(buttons)
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"✅ Оплата от гостя {guest_name} подтверждена!\n\nВыберите апартамент для отправки информации о заселении:",
+        text=f"✅ Оплата от гостя {guest_name} подтверждена!\n\nВыберите апартамент:",
         reply_markup=keyboard
     )
 
@@ -272,12 +273,12 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         memory = load_memory()
         objects = memory.get("objects", {})
         if not objects:
-            await query.edit_message_text("⚠️ База апартаментов пуста! Добавьте через /add")
+            await query.edit_message_text("⚠️ База апартаментов пуста!")
             return
 
         buttons = []
-        for name in objects.keys():
-            buttons.append([InlineKeyboardButton(f"🏠 {name}", callback_data=f"apt_{name}")])
+        for i, name in enumerate(objects.keys()):
+            buttons.append([InlineKeyboardButton(f"🏠 {name}", callback_data=f"apt_{i}")])
         keyboard = InlineKeyboardMarkup(buttons)
         await query.edit_message_text(
             "✅ Оплата получена!\n\nВыберите апартамент для отправки гостю:",
@@ -289,36 +290,58 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         guest_id = int(query.data.split("_")[2])
         await context.bot.send_message(
             chat_id=guest_id,
-            text="⚠️ Оплата не поступила.\n\n"
-                 "Пожалуйста, проверьте правильность перевода и пришлите чек повторно.\n\n"
+            text=f"⚠️ Оплата не поступила.\n\n"
+                 f"Пожалуйста, проверьте правильность перевода и пришлите чек повторно.\n\n"
                  f"Реквизиты для оплаты:\n{PAYMENT_INFO}\n\n"
-                 "⚠️ При переводе *ничего не пишите* в комментарии к платежу.",
-            parse_mode="Markdown"
+                 f"При переводе ничего не пишите в комментарии к платежу."
         )
         guest_states[guest_id] = "waiting_payment"
         await query.edit_message_text("❌ Гость уведомлён — оплата не поступила.")
 
-    # Выбор апартамента
+    # Выбор апартамента по индексу
     elif query.data.startswith("apt_"):
-        apt_name = query.data[4:]
+        try:
+            apt_index = int(query.data[4:])
+        except:
+            await query.edit_message_text("❌ Ошибка выбора апартамента.")
+            return
+
         admin_chat_id = str(query.message.chat_id)
         guest_id = pending_guest.get(admin_chat_id)
         if not guest_id:
-            await query.edit_message_text("❌ Не удалось найти гостя.")
+            await query.edit_message_text("❌ Не удалось найти гостя. Попробуйте снова.")
             return
+
         memory = load_memory()
-        apt_info = memory["objects"].get(apt_name)
-        if not apt_info:
-            await query.edit_message_text(f"❌ Апартамент '{apt_name}' не найден.")
+        objects = memory.get("objects", {})
+        apt_names = list(objects.keys())
+
+        if apt_index >= len(apt_names):
+            await query.edit_message_text("❌ Апартамент не найден.")
             return
-        await context.bot.send_message(
-            chat_id=guest_id,
-            text=f"✅ Ваша оплата подтверждена!\n\n{apt_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊",
-            parse_mode="Markdown"
-        )
+
+        apt_name = apt_names[apt_index]
+        apt_info = objects[apt_name]
+
+        try:
+            await context.bot.send_message(
+                chat_id=guest_id,
+                text=f"✅ Ваша оплата подтверждена!\n\n{apt_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊",
+                parse_mode="HTML"
+            )
+        except Exception:
+            # Если HTML не работает — отправляем без форматирования
+            # Убираем HTML теги
+            import re
+            clean_info = re.sub(r'<[^>]+>', '', apt_info)
+            await context.bot.send_message(
+                chat_id=guest_id,
+                text=f"✅ Ваша оплата подтверждена!\n\n{clean_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊"
+            )
+
         guest_states[guest_id] = "verified"
         conversation_history[guest_id] = []
-        await query.edit_message_text(f"✅ Информация по *{apt_name}* отправлена гостю!", parse_mode="Markdown")
+        await query.edit_message_text(f"✅ Информация по апартаменту отправлена гостю!")
         del pending_guest[admin_chat_id]
 
 async def ask_guest_time(update, request_type):
