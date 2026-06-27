@@ -339,28 +339,79 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         apt_name = apt_names[apt_index]
         apt_info = objects[apt_name]
 
+        # Кнопки "Мы выехали" и "Новая бронь"
+        checkout_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🚪 Мы выехали", callback_data=f"checkout_{guest_id}_{apt_name[:20]}"),
+                InlineKeyboardButton("🔄 Продление/Новая бронь", callback_data=f"newbooking_{guest_id}")
+            ]
+        ])
+
         try:
             await context.bot.send_message(
                 chat_id=guest_id,
                 text=f"✅ Ваша оплата подтверждена!\n\n{apt_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊",
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=checkout_keyboard
             )
         except Exception:
-            # Если HTML не работает — отправляем без форматирования
-            # Убираем HTML теги
             import re
             clean_info = re.sub(r'<[^>]+>', '', apt_info)
             await context.bot.send_message(
                 chat_id=guest_id,
-                text=f"✅ Ваша оплата подтверждена!\n\n{clean_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊"
+                text=f"✅ Ваша оплата подтверждена!\n\n{clean_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊",
+                reply_markup=checkout_keyboard
             )
 
+        # Сохраняем апартамент гостя для контекста
         guest_states[guest_id] = "verified"
+        context.bot_data.setdefault("guest_apt", {})[guest_id] = apt_name
         conversation_history[guest_id] = []
         await query.edit_message_text(f"✅ Информация по апартаменту отправлена гостю!")
         del pending_guest[admin_chat_id]
 
-async def ask_guest_time(update, request_type):
+    # Кнопка "Мы выехали"
+    elif query.data.startswith("checkout_"):
+        parts = query.data.split("_", 2)
+        guest_id = int(parts[1])
+        apt_name = parts[2] if len(parts) > 2 else "апартамент"
+
+        # Уведомляем администратора
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"🚪 *{apt_name} кв — выехали*",
+                parse_mode="Markdown"
+            )
+
+        # Просим гостя оставить обратную связь и реквизиты для залога
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(
+            chat_id=guest_id,
+            text="Спасибо что выбрали *Alekseev Apartments!* 🙏\n\n"
+                 "Пожалуйста, дайте нам обратную связь здесь в чате — "
+                 "ваше мнение очень важно для нас! 😊\n\n"
+                 "А также для возврата залога пришлите ваши реквизиты в формате:\n\n"
+                 "_Номер телефона / Банк / ФИО получателя_\n\n"
+                 "_Например: +79001234567 / Сбербанк / Иванов Иван Иванович_",
+            parse_mode="Markdown"
+        )
+        guest_states[guest_id] = "waiting_review_and_requisites"
+
+    # Кнопка "Продление/Новая бронь"
+    elif query.data.startswith("newbooking_"):
+        guest_id = int(query.data.split("_")[1])
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(
+            chat_id=guest_id,
+            text="Рады слышать вас! 🎉\n\n"
+                 "Укажите пожалуйста даты — с какой по какую дату вы хотите забронировать?\n\n"
+                 "_Например: с 01.07 по 05.07_",
+            parse_mode="Markdown"
+        )
+        guest_states[guest_id] = "waiting_new_booking_dates"
+
+
     if request_type == "early":
         await update.message.reply_text(
             "🕐 *Ранний заезд*\n\n"
@@ -1066,7 +1117,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guest_states[user_id] = "verified"
         return
 
-    if guest_states.get(user_id) == "waiting_extension_days":
+    if state == "waiting_new_booking_dates":
+        # Пересылаем даты администратору
+        if ADMIN_CHAT_ID:
+            username = f"@{user.username}" if user.username else f"{user.first_name}"
+            guest_name = context.user_data.get("guest_name", username)
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"🔄 *Запрос на продление/новую бронь*\n\n"
+                     f"Гость: {username}\n"
+                     f"ФИО: {guest_name}\n"
+                     f"Даты: {user_text}",
+                parse_mode="Markdown"
+            )
+        await update.message.reply_text(
+            "Спасибо! 😊\n\n"
+            "В ближайшее время с вами свяжется оператор по вопросу бронирования. ⏱"
+        )
+        guest_states[user_id] = "verified"
+        return
+
+
+        # Пересылаем отзыв и реквизиты администратору
+        if ADMIN_CHAT_ID:
+            username = f"@{user.username}" if user.username else f"{user.first_name}"
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"📝 *Отзыв и реквизиты от гостя {username}:*\n\n{user_text}",
+                parse_mode="Markdown"
+            )
+        # Благодарим гостя
+        await update.message.reply_text(
+            "Благодарим вас за отзыв! 🙏\n\n"
+            "Залог будем рады вернуть вам сегодня до 00:00. ✅\n\n"
+            "Будем рады видеть вас снова в *Alekseev Apartments!* 🏠",
+            parse_mode="Markdown"
+        )
+        guest_states[user_id] = "checkout_done"
+        return
+
+    if state == "checkout_done":
+        await update.message.reply_text(
+            "Спасибо что были с нами! 😊\n"
+            "Если захотите забронировать снова — напишите нам!"
+        )
+        return
+
+
         days = user_text.strip()
         guest_states[user_id] = "verified"
         await notify_admin_extension(context, user, days)
