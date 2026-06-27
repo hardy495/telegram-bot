@@ -452,13 +452,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conversation_history[user_id] = []
     await update.message.reply_text(
         "Здравствуйте! 👋 Добро пожаловать в *Alekseev Apartments!*\n\n"
-        "🔑 Заселение *дистанционное* — вы заселяетесь самостоятельно через минисейф. "
-        "Все инструкции придут после подтверждения оплаты.\n\n"
-        "Для заселения нам потребуется:\n"
-        "📄 Фото паспорта (лицевая сторона)\n"
-        "💰 Оплата остатка по брони + залог *2000 руб.* _(возвращается в день выезда)_\n\n"
-        "💬 _Если возникнут вопросы — всегда на связи!_\n\n"
-        "Напишите имя на которое оформлена бронь и даты заезда/выезда:\n"
+        "Для того чтобы найти ваше бронирование в системе, пришлите пожалуйста "
+        "вашу *фамилию и имя* на которое оформлена бронь и *даты* заезда/выезда:\n\n"
         "_Например: Иванов Иван с 01.01 по 02.01_",
         parse_mode="Markdown"
     )
@@ -555,11 +550,13 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
 
         if guest_id:
-            guest_states[guest_id] = "waiting_passport"
+            guest_states[guest_id] = "waiting_docs"
             await context.bot.send_message(
                 chat_id=guest_id,
                 text=f"✅ Бронь найдена!\n\n"
-                     f"Пожалуйста, пришлите:\n\n"
+                     f"🔑 *Заселение у нас дистанционное* — вы заселяетесь самостоятельно через минисейф. "
+                     f"Все инструкции, пароли и адрес придут после подтверждения оплаты.\n\n"
+                     f"Для оформления нам потребуется:\n\n"
                      f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
                      f"💰 Чек об оплате по реквизитам:\n\n"
                      f"• Остаток по бронированию: *{amount} руб.*\n"
@@ -670,7 +667,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = guest_states.get(user_id)
     username = f"@{user.username}" if user.username else f"{user.first_name}"
 
-    if state not in ["waiting_passport", "waiting_payment"]:
+    # Принимаем фото только если гость в процессе верификации
+    if state not in ["waiting_passport", "waiting_payment", "waiting_docs"]:
         await update.message.reply_text("Спасибо за фото! Если есть вопросы — задавайте 😊")
         return
 
@@ -679,16 +677,29 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo_file = await context.bot.get_file(photo.file_id)
     photo_bytes = await photo_file.download_as_bytearray()
 
-    if state == "waiting_passport":
-        is_valid, _ = await analyze_photo_with_ai(bytes(photo_bytes), "passport")
-        if not is_valid:
-            await update.message.reply_text(
-                "❌ Это не похоже на паспорт.\n\n"
-                "Пожалуйста, пришлите фото *лицевой стороны паспорта* 📄\n\n"
-                "Убедитесь что:\n• Фото чёткое и хорошо освещено\n• Видны все данные\n• Это именно паспорт",
-                parse_mode="Markdown"
-            )
+    # ИИ определяет что пришло — паспорт или чек
+    detect_response = claude.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=20,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(photo_bytes).decode("utf-8")}},
+                {"type": "text", "text": "Что на фото? Ответь только одним словом: ПАСПОРТ, ЧЕК или ДРУГОЕ"}
+            ]
+        }]
+    )
+    doc_type = detect_response.content[0].text.strip().upper()
+
+    # Определяем что уже получено от гостя
+    has_passport = context.user_data.get("has_passport", False)
+    has_payment = context.user_data.get("has_payment", False)
+
+    if "ПАСПОРТ" in doc_type:
+        if has_passport:
+            await update.message.reply_text("📄 Паспорт уже получен. Пришлите чек об оплате 🧾")
             return
+        # Паспорт принят
         if ADMIN_CHAT_ID:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
@@ -700,14 +711,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from_chat_id=update.effective_chat.id,
                 message_id=update.message.message_id
             )
-        guest_states[user_id] = "waiting_payment"
-        await update.message.reply_text(
-            "✅ Паспорт принят, спасибо!\n\n"
-            "Теперь пришлите чек об оплате 🧾"
-        )
+        context.user_data["has_passport"] = True
+        if has_payment:
+            # Оба документа получены
+            await _finalize_docs(update, context, user_id, username)
+        else:
+            await update.message.reply_text("✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾")
+            guest_states[user_id] = "waiting_docs"
 
-    elif state == "waiting_payment":
-        # Получаем ожидаемую сумму из данных гостя
+    elif "ЧЕК" in doc_type:
+        if has_payment:
+            await update.message.reply_text("🧾 Чек уже получен. Пришлите фото паспорта 📄")
+            return
+
+        # Проверяем сумму чека
         guest_name = context.user_data.get("guest_name", "").lower()
         date_from = context.user_data.get("date_from", "")
         expected_amount = None
@@ -737,24 +754,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              f"Гость: {context.user_data.get('guest_name', 'не указано')}\n"
                              f"Сумма в чеке: {found} руб.\n"
                              f"Запрошенная сумма: {expected_amount} руб.\n\n"
-                             f"❌ СУММЫ НЕ СОВПАДАЮТ\n\nЧек 👇",
+                             f"❌ СУММЫ НЕ СОВПАДАЮТ\n\nЧек 👇"
                     )
                     await context.bot.forward_message(
                         chat_id=ADMIN_CHAT_ID,
                         from_chat_id=update.effective_chat.id,
                         message_id=update.message.message_id
                     )
-                    keyboard = InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
-                            InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
-                        ]
-                    ])
-                    await context.bot.send_message(
-                        chat_id=ADMIN_CHAT_ID,
-                        text="Подтвердите получение оплаты:",
-                        reply_markup=keyboard
-                    )
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
+                        InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
+                    ]])
+                    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Подтвердите получение оплаты:", reply_markup=keyboard)
                 guest_states[user_id] = "waiting_admin_confirmation"
                 await update.message.reply_text(
                     "⚠️ Сумма в чеке не совпадает с запрошенной.\n\n"
@@ -763,23 +774,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
-        # Чек валидный — извлекаем сумму из reason для отчёта администратору
-        found_amount = "не удалось определить"
-        if ":" in reason:
-            found_amount = reason.split(":")[-1].strip() + " руб."
-
+        # Чек валидный
+        found_amount = reason.split(":")[-1].strip() + " руб." if ":" in reason else "не определена"
         if ADMIN_CHAT_ID:
-            amount_status = ""
-            if expected_amount:
-                amount_status = f"✅ Сумма совпадает: {expected_amount} руб." if found_amount != "не удалось определить" else "⚠️ Сумма не определена — проверьте вручную"
-            else:
-                amount_status = "⚠️ Ожидаемая сумма не найдена в базе — проверьте вручную"
-
+            expected_str = f"{expected_amount} руб." if expected_amount else "не определена"
+            amount_status = f"✅ Сумма совпадает: {expected_str}" if expected_amount else "⚠️ Проверьте вручную"
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
                 text=f"🧾 Чек от гостя {username}\n\n"
                      f"Гость: {context.user_data.get('guest_name', 'не указано')}\n"
-                     f"Запрошенная сумма: {expected_amount or 'не определена'} руб.\n\n"
+                     f"Запрошенная сумма: {expected_str}\n\n"
                      f"{amount_status}\n\nЧек 👇"
             )
             await context.bot.forward_message(
@@ -787,23 +791,41 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from_chat_id=update.effective_chat.id,
                 message_id=update.message.message_id
             )
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
-                    InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
-                ]
-            ])
-            await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text="Подтвердите получение оплаты:",
-                reply_markup=keyboard
-            )
-        guest_states[user_id] = "waiting_admin_confirmation"
+
+        context.user_data["has_payment"] = True
+        if has_passport:
+            await _finalize_docs(update, context, user_id, username)
+        else:
+            await update.message.reply_text("✅ Чек принят!\n\nТеперь пришлите фото паспорта 📄")
+            guest_states[user_id] = "waiting_docs"
+
+    else:
         await update.message.reply_text(
-            "✅ Чек получен!\n\n"
-            "Документы переданы на проверку оплаты.\n"
-            "⏱ Обычно это занимает не более 10 минут.\n\n"
-            "Пока ждёте — если есть вопросы, я готов помочь! 😊"
+            "❌ Не удалось определить документ.\n\n"
+            "Пожалуйста, пришлите:\n"
+            "📄 Фото паспорта (лицевая сторона)\n"
+            "🧾 Чек об оплате"
+        )
+
+
+async def _finalize_docs(update, context, user_id, username):
+    """Оба документа получены — отправляем кнопки апартаментов администратору"""
+    guest_states[user_id] = "waiting_admin_confirmation"
+    await update.message.reply_text(
+        "✅ Все документы получены!\n\n"
+        "Документы переданы на проверку оплаты.\n"
+        "⏱ Обычно это занимает не более 10 минут.\n\n"
+        "Пока ждёте — если есть вопросы, я готов помочь! 😊"
+    )
+    if ADMIN_CHAT_ID:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
+            InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
+        ]])
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"✅ Все документы от гостя {username} получены!\nПодтвердите получение оплаты:",
+            reply_markup=keyboard
         )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1011,10 +1033,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if balance_data:
             amount = balance_data["amount"]
             total = amount + DEPOSIT
-            guest_states[user_id] = "waiting_passport"
+            guest_states[user_id] = "waiting_docs"
             await update.message.reply_text(
                 f"✅ Бронь найдена!\n\n"
-                f"Пожалуйста, пришлите:\n\n"
+                f"🔑 *Заселение у нас дистанционное* — вы заселяетесь самостоятельно через минисейф. "
+                f"Все инструкции, пароли и адрес придут после подтверждения оплаты.\n\n"
+                f"Для оформления нам потребуется:\n\n"
                 f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
                 f"💰 Чек об оплате по реквизитам:\n\n"
                 f"• Остаток по бронированию: *{amount} руб.*\n"
@@ -1105,14 +1129,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if balance_data:
             amount = balance_data["amount"]
             total = amount + DEPOSIT
-            guest_states[user_id] = "waiting_passport"
+            guest_states[user_id] = "waiting_docs"
             context.user_data["guest_name"] = name
             context.user_data["date_from"] = date_from
             context.user_data["date_to"] = date_to
             guest_name_to_id[name.lower()] = user_id
             await update.message.reply_text(
                 f"✅ Бронь найдена!\n\n"
-                f"Пожалуйста, пришлите:\n\n"
+                f"🔑 *Заселение у нас дистанционное* — вы заселяетесь самостоятельно через минисейф. "
+                f"Все инструкции, пароли и адрес придут после подтверждения оплаты.\n\n"
+                f"Для оформления нам потребуется:\n\n"
                 f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
                 f"💰 Чек об оплате по реквизитам:\n\n"
                 f"• Остаток по бронированию: *{amount} руб.*\n"
@@ -1133,8 +1159,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    if state == "waiting_passport":
-        await update.message.reply_text("Пожалуйста, пришлите фото паспорта 📄")
+    if state == "waiting_docs":
+        await update.message.reply_text(
+            "Пожалуйста пришлите:\n"
+            "📄 Фото паспорта (лицевая сторона)\n"
+            "🧾 Чек об оплате\n\n"
+            "Можно в любом порядке!"
+        )
         return
 
     if state == "waiting_payment":
@@ -1147,13 +1178,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation_history[user_id] = []
         await update.message.reply_text(
             "Здравствуйте! 👋 Добро пожаловать в *Alekseev Apartments!*\n\n"
-            "🔑 Заселение *дистанционное* — вы заселяетесь самостоятельно через минисейф. "
-            "Все инструкции придут после подтверждения оплаты.\n\n"
-            "Для заселения нам потребуется:\n"
-            "📄 Фото паспорта (лицевая сторона)\n"
-            "💰 Оплата остатка по брони + залог *2000 руб.* _(возвращается в день выезда)_\n\n"
-            "💬 _Если возникнут вопросы — всегда на связи!_\n\n"
-            "Напишите имя на которое оформлена бронь и даты заезда/выезда:\n"
+            "Для того чтобы найти ваше бронирование в системе, пришлите пожалуйста "
+            "вашу *фамилию и имя* на которое оформлена бронь и *даты* заезда/выезда:\n\n"
             "_Например: Иванов Иван с 01.01 по 02.01_",
             parse_mode="Markdown"
         )
