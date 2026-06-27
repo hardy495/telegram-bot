@@ -998,14 +998,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 balance_data = None
 
-        # Уведомляем админа только если бронь не найдена
+        # Уведомляем админа только если бронь не найдена — просто сообщаем без подсказок
         if not balance_data and ADMIN_CHAT_ID:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
                 text=f"🆕 Новый гость: *{name}*\n"
-                     f"Заезд: {date_from or '?'} | Выезд: {date_to or '?'}\n\n"
-                     f"Бронь не найдена — внесите данные:\n"
-                     f"`/balance {name} | {date_from} | {date_to} | СУММА`",
+                     f"Заезд: {date_from or '?'} | Выезд: {date_to or '?'}\n"
+                     f"Бронь не найдена в базе.",
                 parse_mode="Markdown"
             )
 
@@ -1038,10 +1037,100 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if state == "waiting_balance":
-        await update.message.reply_text(
-            "⏱ Уточняем информацию по вашему бронированию.\n"
-            "Ожидайте — свяжемся в течение 10 минут!"
+        # Гость написал снова — пробуем найти бронь ещё раз с новыми данными
+        raw = user_text.strip()
+
+        parse_response = claude.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=150,
+            messages=[{
+                "role": "user",
+                "content": f"""Из текста извлеки имя и даты бронирования.
+Текст: "{raw}"
+
+Ответь строго в формате (каждое на новой строке):
+ИМЯ: (имя гостя)
+ЗАЕЗД: (дата заезда)
+ВЫЕЗД: (дата выезда)
+
+Если дата не указана — оставь поле пустым."""
+            }]
         )
+
+        name = ""
+        date_from = ""
+        date_to = ""
+        for line in parse_response.content[0].text.strip().split("\n"):
+            if line.upper().startswith("ИМЯ:"):
+                name = line.split(":", 1)[-1].strip()
+            elif line.upper().startswith("ЗАЕЗД:"):
+                date_from = line.split(":", 1)[-1].strip()
+            elif line.upper().startswith("ВЫЕЗД:"):
+                date_to = line.split(":", 1)[-1].strip()
+
+        if not name:
+            await update.message.reply_text(
+                "Пожалуйста, напишите имя и даты бронирования.\n\n"
+                "_Например: Иванов Иван с 01.07 по 05.07_",
+                parse_mode="Markdown"
+            )
+            return
+
+        # Ищем бронь через ИИ
+        balance_data = None
+        if guest_balances:
+            bookings_text = ""
+            booking_keys = []
+            for i, (key, data) in enumerate(guest_balances.items()):
+                bookings_text += f"{i+1}. Имя: {data['name']}, заезд: {data['date_from']}, выезд: {data['date_to']}\n"
+                booking_keys.append(key)
+
+            match_response = claude.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=10,
+                messages=[{
+                    "role": "user",
+                    "content": f"""Гость: имя="{name}", заезд="{date_from}", выезд="{date_to}"
+Брони: {bookings_text}
+Найди совпадение по имени и датам. Ответь только номером (1,2...) или 0."""
+                }]
+            )
+            try:
+                match_num = int(match_response.content[0].text.strip())
+                if 1 <= match_num <= len(booking_keys):
+                    balance_data = guest_balances[booking_keys[match_num - 1]]
+            except:
+                balance_data = None
+
+        if balance_data:
+            amount = balance_data["amount"]
+            total = amount + DEPOSIT
+            guest_states[user_id] = "waiting_passport"
+            context.user_data["guest_name"] = name
+            context.user_data["date_from"] = date_from
+            context.user_data["date_to"] = date_to
+            guest_name_to_id[name.lower()] = user_id
+            await update.message.reply_text(
+                f"✅ Бронь найдена!\n\n"
+                f"Пожалуйста, пришлите:\n\n"
+                f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
+                f"💰 Чек об оплате по реквизитам:\n\n"
+                f"• Остаток по бронированию: *{amount} руб.*\n"
+                f"• Залог: *{DEPOSIT} руб.* _(возвращается в день выезда до конца дня)_\n"
+                f"• *Итого: {total} руб.*\n\n"
+                f"{PAYMENT_INFO}\n\n"
+                f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                f"🔍 Бронирование на имя *{name}*"
+                f"{f' с {date_from} по {date_to}' if date_from else ''}"
+                f" не найдено.\n\n"
+                f"Пожалуйста, проверьте правильность написания имени и дат и напишите снова.\n\n"
+                f"_Например: Иванов Иван с 01.07 по 05.07_",
+                parse_mode="Markdown"
+            )
         return
 
     if state == "waiting_passport":
