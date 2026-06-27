@@ -376,11 +376,11 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         guest_id = int(parts[1])
         apt_name = parts[2] if len(parts) > 2 else "апартамент"
 
-        # Уведомляем администратора
+        # Уведомляем администратора — убираем дублирование "кв"
         if ADMIN_CHAT_ID:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
-                text=f"🚪 *{apt_name} кв — выехали*",
+                text=f"🚪 *{apt_name} — выехали*",
                 parse_mode="Markdown"
             )
 
@@ -1137,23 +1137,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guest_states[user_id] = "verified"
         return
 
+    if state == "waiting_review_and_requisites":
+        # ИИ определяет — реквизиты или обратная связь
+        check_response = claude.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=20,
+            messages=[{
+                "role": "user",
+                "content": f"Это реквизиты для перевода денег (номер телефона/банк/ФИО)? Текст: \"{user_text}\"\nОтветь только: РЕКВИЗИТЫ или ОТЗЫВ"
+            }]
+        )
+        is_requisites = "РЕКВИЗИТЫ" in check_response.content[0].text.upper()
+        apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
+        username = f"@{user.username}" if user.username else f"{user.first_name}"
 
-        # Пересылаем отзыв и реквизиты администратору
-        if ADMIN_CHAT_ID:
-            username = f"@{user.username}" if user.username else f"{user.first_name}"
-            await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=f"📝 *Отзыв и реквизиты от гостя {username}:*\n\n{user_text}",
+        if is_requisites:
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=f"💳 *Реквизиты для возврата залога*\n\n"
+                         f"Апартамент: *{apt_name}*\n"
+                         f"Гость: {username}\n\n"
+                         f"Реквизиты:\n{user_text}",
+                    parse_mode="Markdown"
+                )
+            await update.message.reply_text(
+                "Благодарим вас за реквизиты! 🙏\n\n"
+                "Залог вернём вам сегодня до 00:00. ✅\n\n"
+                "Будем рады видеть вас снова в *Alekseev Apartments!* 🏠",
                 parse_mode="Markdown"
             )
-        # Благодарим гостя
-        await update.message.reply_text(
-            "Благодарим вас за отзыв! 🙏\n\n"
-            "Залог будем рады вернуть вам сегодня до 00:00. ✅\n\n"
-            "Будем рады видеть вас снова в *Alekseev Apartments!* 🏠",
-            parse_mode="Markdown"
-        )
-        guest_states[user_id] = "checkout_done"
+            guest_states[user_id] = "checkout_done"
+        else:
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=f"⭐ *Обратная связь от гостя*\n\n"
+                         f"Апартамент: *{apt_name}*\n"
+                         f"Гость: {username}\n\n"
+                         f"{user_text}",
+                    parse_mode="Markdown"
+                )
+            await update.message.reply_text(
+                "Спасибо за обратную связь! 🙏\n\n"
+                "Для возврата залога пришлите пожалуйста реквизиты:\n\n"
+                "_Номер телефона / Банк / ФИО получателя_\n\n"
+                "_Например: +79001234567 / Сбербанк / Иванов Иван Иванович_",
+                parse_mode="Markdown"
+            )
         return
 
     if state == "checkout_done":
@@ -1174,7 +1205,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Верифицированный гость — отвечаем через Claude
+    # Включаем информацию об апартаменте гостя в контекст
+    apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "")
+    apt_context = ""
+    if apt_name:
+        memory = load_memory()
+        apt_info = memory.get("objects", {}).get(apt_name, "")
+        if apt_info:
+            import re
+            clean_info = re.sub(r'<[^>]+>', '', apt_info)
+            apt_context = f"\n\n=== АПАРТАМЕНТ ГОСТЯ: {apt_name} ===\n{clean_info}"
 
+    if user_id not in conversation_history:
         conversation_history[user_id] = []
 
     conversation_history[user_id].append({"role": "user", "content": user_text})
@@ -1184,7 +1227,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = claude.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1000,
-        system=SYSTEM_PROMPT.format(knowledge=get_all_knowledge()),
+        system=SYSTEM_PROMPT.format(knowledge=get_all_knowledge() + apt_context),
         messages=conversation_history[user_id]
     )
     reply = response.content[0].text
