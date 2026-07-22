@@ -345,8 +345,9 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
     elif query.data.startswith("pdf_check_"):
         guest_id = int(query.data.split("_")[2])
         pdf_docs = context.bot_data.setdefault("pdf_docs", {}).setdefault(guest_id, {})
-        has_passport = pdf_docs.get("has_passport", False)
+        has_passport = pdf_docs.get("has_passport", False) or context.bot_data.get("has_passport_" + str(guest_id), False)
         pdf_docs["has_payment"] = True
+        context.bot_data["has_payment_" + str(guest_id)] = True
 
         if has_passport:
             guest_states[guest_id] = "waiting_admin_confirmation"
@@ -779,43 +780,40 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Конвертируем PDF в изображение для анализа через ИИ
     if doc.mime_type == "application/pdf":
-        try:
-            import pypdf
-            from PIL import Image
-            import io
+        # Отправляем PDF напрямую в Claude — он умеет читать PDF
+        pdf_data = base64.standard_b64encode(bytes(file_bytes)).decode("utf-8")
 
-            # Читаем PDF
-            reader = pypdf.PdfReader(io.BytesIO(bytes(file_bytes)))
-            page = reader.pages[0]
+        detect_response = claude.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=20,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": pdf_data
+                        }
+                    },
+                    {"type": "text", "text": "Что в этом документе? Ответь только одним словом: ПАСПОРТ, ЧЕК или ДРУГОЕ"}
+                ]
+            }]
+        )
+        doc_type = detect_response.content[0].text.strip().upper()
 
-            # Рендерим страницу в изображение
-            from pypdf.generic import RectangleObject
-            import struct
+        has_passport = context.user_data.get("has_passport", False)
+        has_payment = context.user_data.get("has_payment", False)
 
-            # Извлекаем изображения из PDF если есть
-            images_in_pdf = []
-            if "/Resources" in page and "/XObject" in page["/Resources"]:
-                xobjects = page["/Resources"]["/XObject"].get_object()
-                for obj in xobjects:
-                    xobj = xobjects[obj].get_object()
-                    if xobj.get("/Subtype") == "/Image":
-                        data = xobj.get_data()
-                        img = Image.open(io.BytesIO(data))
-                        images_in_pdf.append(img)
-
-            if images_in_pdf:
-                img_byte_arr = io.BytesIO()
-                images_in_pdf[0].convert("RGB").save(img_byte_arr, format='JPEG', quality=85)
-                file_bytes = bytearray(img_byte_arr.getvalue())
-            else:
-                raise Exception("Нет изображений в PDF")
-
-        except Exception:
-            # Fallback — пересылаем администратору с кнопками
+        if "ПАСПОРТ" in doc_type:
+            if has_passport:
+                await update.message.reply_text("📄 Паспорт уже получен. Пришлите чек об оплате 🧾")
+                return
             if ADMIN_CHAT_ID:
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
-                    text=f"📄 *PDF от гостя:* {username} (ID: {user_id})\nПроверьте вручную 👇",
+                    text=f"📄 *Паспорт (PDF) от гостя:* {username} (ID: {user_id})\n✅ ИИ подтвердил",
                     parse_mode="Markdown"
                 )
                 await context.bot.forward_message(
@@ -823,19 +821,100 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     from_chat_id=update.effective_chat.id,
                     message_id=update.message.message_id
                 )
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📄 Это паспорт", callback_data=f"pdf_passport_{user_id}"),
-                    InlineKeyboardButton("🧾 Это чек", callback_data=f"pdf_check_{user_id}")
-                ]])
+            context.user_data["has_passport"] = True
+            if has_payment:
+                await _finalize_docs(update, context, user_id, username)
+            else:
+                await update.message.reply_text("✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾")
+                guest_states[user_id] = "waiting_docs"
+
+        elif "ЧЕК" in doc_type:
+            if has_payment:
+                await update.message.reply_text("🧾 Чек уже получен. Пришлите фото паспорта 📄")
+                return
+
+            # Проверяем сумму через Claude
+            guest_name = context.user_data.get("guest_name", "").lower()
+            date_from = context.user_data.get("date_from", "")
+            expected_amount = None
+            for key, data in guest_balances.items():
+                name_match = data["name_lower"] in guest_name or guest_name in data["name_lower"]
+                date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
+                if name_match and date_match:
+                    expected_amount = data["amount"] + DEPOSIT
+                    break
+
+            if expected_amount:
+                amount_check = claude.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=50,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": pdf_data
+                                }
+                            },
+                            {"type": "text", "text": f"Найди сумму перевода в этом чеке. Она равна {expected_amount} рублям? Ответь: СОВПАДАЕТ, НЕ СОВПАДАЕТ (и укажи найденную сумму) или НЕИЗВЕСТНО"}
+                        ]
+                    }]
+                )
+                amount_result = amount_check.content[0].text.strip()
+
+                if "НЕ СОВПАДАЕТ" in amount_result.upper():
+                    if ADMIN_CHAT_ID:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_CHAT_ID,
+                            text=f"⚠️ Чек (PDF) от гостя {username}\n\n"
+                                 f"Гость: {context.user_data.get('guest_name', '?')}\n"
+                                 f"Запрошенная сумма: {expected_amount} руб.\n"
+                                 f"Результат: {amount_result}\n\n❌ СУММЫ НЕ СОВПАДАЮТ\n\nЧек 👇"
+                        )
+                        await context.bot.forward_message(
+                            chat_id=ADMIN_CHAT_ID,
+                            from_chat_id=update.effective_chat.id,
+                            message_id=update.message.message_id
+                        )
+                        keyboard = InlineKeyboardMarkup([[
+                            InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
+                            InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
+                        ]])
+                        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Подтвердите:", reply_markup=keyboard)
+                    guest_states[user_id] = "waiting_admin_confirmation"
+                    await update.message.reply_text(
+                        "⚠️ Сумма в чеке не совпадает.\n\nЧек передан администратору на проверку. ⏱"
+                    )
+                    return
+
+            # Чек принят
+            if ADMIN_CHAT_ID:
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
-                    text="Что прислал гость?",
-                    reply_markup=keyboard
+                    text=f"🧾 Чек (PDF) от гостя {username}\n"
+                         f"Запрошенная сумма: {expected_amount or '?'} руб.\n✅ Сумма совпадает\n\nЧек 👇"
                 )
+                await context.bot.forward_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id
+                )
+            context.user_data["has_payment"] = True
+            if has_passport:
+                await _finalize_docs(update, context, user_id, username)
+            else:
+                await update.message.reply_text("✅ Чек принят!\n\nТеперь пришлите фото паспорта 📄")
+                guest_states[user_id] = "waiting_docs"
+
+        else:
             await update.message.reply_text(
-                "✅ Документ получен! Проверяем... ⏱\n\nЕсли есть вопросы — готов помочь! 😊"
+                "❌ Не удалось определить документ.\n\n"
+                "Пришлите:\n📄 Паспорт (фото или PDF)\n🧾 Чек (фото или PDF)"
             )
-            return
+        return
 
     # Передаём в тот же обработчик что и фото
     # Создаём временный объект с байтами для анализа
