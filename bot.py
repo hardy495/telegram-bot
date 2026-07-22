@@ -372,6 +372,26 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
     elif query.data.startswith("received_"):
         guest_id = int(query.data.split("_")[1])
         admin_chat_id = str(query.message.chat_id)
+
+        # Проверяем есть ли паспорт от гостя
+        has_passport = context.bot_data.get(f"has_passport_{guest_id}", False)
+
+        # Также проверяем через guest_states контекст
+        # Ищем в bot_data напрямую
+        guest_pdf_docs = context.bot_data.get("pdf_docs", {}).get(guest_id, {})
+        has_passport = has_passport or guest_pdf_docs.get("has_passport", False)
+
+        if not has_passport:
+            # Паспорта нет — просим гостя прислать
+            await context.bot.send_message(
+                chat_id=guest_id,
+                text="✅ Оплата подтверждена!\n\n"
+                     "Для завершения оформления пришлите пожалуйста фото паспорта (лицевая сторона) 📄"
+            )
+            guest_states[guest_id] = "waiting_docs"
+            await query.edit_message_text("✅ Оплата подтверждена! Ожидаем паспорт от гостя.")
+            return
+
         pending_guest[admin_chat_id] = guest_id
 
         memory = load_memory()
@@ -822,6 +842,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_id=update.message.message_id
                 )
             context.user_data["has_passport"] = True
+            context.bot_data[f"has_passport_{user_id}"] = True
             if has_payment:
                 await _finalize_docs(update, context, user_id, username)
             else:
@@ -953,6 +974,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=update.message.message_id
             )
         context.user_data["has_passport"] = True
+        context.bot_data[f"has_passport_{user_id}"] = True
         if has_payment:
             await _finalize_docs(update, context, user_id, username)
         else:
@@ -1089,6 +1111,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=update.message.message_id
             )
         context.user_data["has_passport"] = True
+        context.bot_data[f"has_passport_{user_id}"] = True
         if has_payment:
             # Оба документа получены
             await _finalize_docs(update, context, user_id, username)
