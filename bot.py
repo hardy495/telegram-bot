@@ -330,7 +330,45 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         )
 
 
-    if query.data.startswith("received_"):
+    # Кнопка "Это паспорт" для PDF
+    elif query.data.startswith("pdf_passport_"):
+        guest_id = int(query.data.split("_")[2])
+        context.bot_data.setdefault("pdf_docs", {}).setdefault(guest_id, {})["has_passport"] = True
+        guest_states[guest_id] = "waiting_docs"
+        await context.bot.send_message(
+            chat_id=guest_id,
+            text="✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾"
+        )
+        await query.edit_message_text("✅ Паспорт гостя подтверждён!")
+
+    # Кнопка "Это чек" для PDF
+    elif query.data.startswith("pdf_check_"):
+        guest_id = int(query.data.split("_")[2])
+        pdf_docs = context.bot_data.setdefault("pdf_docs", {}).setdefault(guest_id, {})
+        has_passport = pdf_docs.get("has_passport", False)
+        pdf_docs["has_payment"] = True
+
+        if has_passport:
+            guest_states[guest_id] = "waiting_admin_confirmation"
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Получил", callback_data=f"received_{guest_id}"),
+                InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{guest_id}")
+            ]])
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Подтвердите получение оплаты:", reply_markup=keyboard)
+            await context.bot.send_message(
+                chat_id=guest_id,
+                text="✅ Все документы получены!\n\nПередано на проверку оплаты. ⏱\nОбычно до 10 минут.\n\nЕсли есть вопросы — готов помочь! 😊"
+            )
+        else:
+            guest_states[guest_id] = "waiting_docs"
+            await context.bot.send_message(
+                chat_id=guest_id,
+                text="✅ Чек принят!\n\nТеперь пришлите фото паспорта 📄"
+            )
+        await query.edit_message_text("✅ Чек гостя подтверждён!")
+
+    # Кнопка "Получил"
+    elif query.data.startswith("received_"):
         guest_id = int(query.data.split("_")[1])
         admin_chat_id = str(query.message.chat_id)
         pending_guest[admin_chat_id] = guest_id
@@ -742,26 +780,41 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Конвертируем PDF в изображение для анализа через ИИ
     if doc.mime_type == "application/pdf":
         try:
-            import fitz  # PyMuPDF
-            pdf_doc = fitz.open(stream=bytes(file_bytes), filetype="pdf")
-            page = pdf_doc[0]
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-            file_bytes = bytearray(pix.tobytes("jpeg"))
-            pdf_doc.close()
-        except ImportError:
-            # Если PyMuPDF не установлен — просто пересылаем администратору
+            from pdf2image import convert_from_bytes
+            # Конвертируем первую страницу PDF в изображение
+            images = convert_from_bytes(bytes(file_bytes), first_page=1, last_page=1, dpi=150)
+            if not images:
+                raise Exception("Не удалось конвертировать PDF")
+            import io
+            img_byte_arr = io.BytesIO()
+            images[0].save(img_byte_arr, format='JPEG', quality=85)
+            file_bytes = bytearray(img_byte_arr.getvalue())
+        except Exception as e:
+            # Если конвертация не удалась — пересылаем администратору с кнопками
             if ADMIN_CHAT_ID:
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
-                    text=f"📄 Документ PDF от гостя {username} (ID: {user_id})\nПроверьте вручную 👇"
+                    text=f"📄 *PDF документ от гостя:* {username} (ID: {user_id})\n"
+                         f"Проверьте вручную 👇",
+                    parse_mode="Markdown"
                 )
                 await context.bot.forward_message(
                     chat_id=ADMIN_CHAT_ID,
                     from_chat_id=update.effective_chat.id,
                     message_id=update.message.message_id
                 )
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📄 Это паспорт", callback_data=f"pdf_passport_{user_id}"),
+                    InlineKeyboardButton("🧾 Это чек", callback_data=f"pdf_check_{user_id}")
+                ]])
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text="Что прислал гость?",
+                    reply_markup=keyboard
+                )
             await update.message.reply_text(
-                "✅ Документ получен и передан администратору на проверку. ⏱"
+                "✅ Документ получен! Проверяем... ⏱\n\n"
+                "Если есть вопросы — я готов помочь! 😊"
             )
             return
 
