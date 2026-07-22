@@ -780,22 +780,42 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Конвертируем PDF в изображение для анализа через ИИ
     if doc.mime_type == "application/pdf":
         try:
-            from pdf2image import convert_from_bytes
-            # Конвертируем первую страницу PDF в изображение
-            images = convert_from_bytes(bytes(file_bytes), first_page=1, last_page=1, dpi=150)
-            if not images:
-                raise Exception("Не удалось конвертировать PDF")
+            import pypdf
+            from PIL import Image
             import io
-            img_byte_arr = io.BytesIO()
-            images[0].save(img_byte_arr, format='JPEG', quality=85)
-            file_bytes = bytearray(img_byte_arr.getvalue())
-        except Exception as e:
-            # Если конвертация не удалась — пересылаем администратору с кнопками
+
+            # Читаем PDF
+            reader = pypdf.PdfReader(io.BytesIO(bytes(file_bytes)))
+            page = reader.pages[0]
+
+            # Рендерим страницу в изображение
+            from pypdf.generic import RectangleObject
+            import struct
+
+            # Извлекаем изображения из PDF если есть
+            images_in_pdf = []
+            if "/Resources" in page and "/XObject" in page["/Resources"]:
+                xobjects = page["/Resources"]["/XObject"].get_object()
+                for obj in xobjects:
+                    xobj = xobjects[obj].get_object()
+                    if xobj.get("/Subtype") == "/Image":
+                        data = xobj.get_data()
+                        img = Image.open(io.BytesIO(data))
+                        images_in_pdf.append(img)
+
+            if images_in_pdf:
+                img_byte_arr = io.BytesIO()
+                images_in_pdf[0].convert("RGB").save(img_byte_arr, format='JPEG', quality=85)
+                file_bytes = bytearray(img_byte_arr.getvalue())
+            else:
+                raise Exception("Нет изображений в PDF")
+
+        except Exception:
+            # Fallback — пересылаем администратору с кнопками
             if ADMIN_CHAT_ID:
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
-                    text=f"📄 *PDF документ от гостя:* {username} (ID: {user_id})\n"
-                         f"Проверьте вручную 👇",
+                    text=f"📄 *PDF от гостя:* {username} (ID: {user_id})\nПроверьте вручную 👇",
                     parse_mode="Markdown"
                 )
                 await context.bot.forward_message(
@@ -813,8 +833,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=keyboard
                 )
             await update.message.reply_text(
-                "✅ Документ получен! Проверяем... ⏱\n\n"
-                "Если есть вопросы — я готов помочь! 😊"
+                "✅ Документ получен! Проверяем... ⏱\n\nЕсли есть вопросы — готов помочь! 😊"
             )
             return
 
