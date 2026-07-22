@@ -710,6 +710,183 @@ async def delete_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"Апартамент '{name}' не найден.")
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка документов — PDF и других файлов"""
+    user_id = update.effective_user.id
+    user = update.effective_user
+    state = guest_states.get(user_id)
+    username = f"@{user.username}" if user.username else f"{user.first_name}"
+
+    if state not in ["waiting_docs", "waiting_payment"]:
+        await update.message.reply_text("Спасибо за документ! Если есть вопросы — задавайте 😊")
+        return
+
+    doc = update.message.document
+    if not doc:
+        return
+
+    # Принимаем PDF и изображения в виде документов
+    allowed_types = ["application/pdf", "image/jpeg", "image/png", "image/jpg"]
+    if doc.mime_type not in allowed_types:
+        await update.message.reply_text(
+            "Пожалуйста пришлите документ в формате PDF, JPG или PNG 📄"
+        )
+        return
+
+    await update.message.reply_text("🔍 Проверяю документ, подождите...")
+
+    # Скачиваем файл
+    doc_file = await context.bot.get_file(doc.file_id)
+    file_bytes = await doc_file.download_as_bytearray()
+
+    # Конвертируем PDF в изображение для анализа через ИИ
+    if doc.mime_type == "application/pdf":
+        try:
+            import fitz  # PyMuPDF
+            pdf_doc = fitz.open(stream=bytes(file_bytes), filetype="pdf")
+            page = pdf_doc[0]
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            file_bytes = bytearray(pix.tobytes("jpeg"))
+            pdf_doc.close()
+        except ImportError:
+            # Если PyMuPDF не установлен — просто пересылаем администратору
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=f"📄 Документ PDF от гостя {username} (ID: {user_id})\nПроверьте вручную 👇"
+                )
+                await context.bot.forward_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id
+                )
+            await update.message.reply_text(
+                "✅ Документ получен и передан администратору на проверку. ⏱"
+            )
+            return
+
+    # Передаём в тот же обработчик что и фото
+    # Создаём временный объект с байтами для анализа
+    update.message._doc_bytes = bytes(file_bytes)
+
+    # ИИ определяет что пришло
+    detect_response = claude.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=20,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(bytes(file_bytes)).decode("utf-8")}},
+                {"type": "text", "text": "Что на изображении? Ответь только одним словом: ПАСПОРТ, ЧЕК или ДРУГОЕ"}
+            ]
+        }]
+    )
+    doc_type = detect_response.content[0].text.strip().upper()
+
+    has_passport = context.user_data.get("has_passport", False)
+    has_payment = context.user_data.get("has_payment", False)
+
+    if "ПАСПОРТ" in doc_type:
+        if has_passport:
+            await update.message.reply_text("📄 Паспорт уже получен. Пришлите чек об оплате 🧾")
+            return
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"📄 *Паспорт (PDF) от гостя:* {username} (ID: {user_id})\n✅ ИИ подтвердил",
+                parse_mode="Markdown"
+            )
+            await context.bot.forward_message(
+                chat_id=ADMIN_CHAT_ID,
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id
+            )
+        context.user_data["has_passport"] = True
+        if has_payment:
+            await _finalize_docs(update, context, user_id, username)
+        else:
+            await update.message.reply_text("✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾")
+            guest_states[user_id] = "waiting_docs"
+
+    elif "ЧЕК" in doc_type:
+        if has_payment:
+            await update.message.reply_text("🧾 Чек уже получен. Пришлите фото паспорта 📄")
+            return
+
+        guest_name = context.user_data.get("guest_name", "").lower()
+        date_from = context.user_data.get("date_from", "")
+        expected_amount = None
+        for key, data in guest_balances.items():
+            name_match = data["name_lower"] in guest_name or guest_name in data["name_lower"]
+            date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
+            if name_match and date_match:
+                expected_amount = data["amount"] + DEPOSIT
+                break
+
+        is_valid, reason = await analyze_photo_with_ai(bytes(file_bytes), "payment", expected_amount)
+
+        if not is_valid:
+            if reason == "not_a_check":
+                await update.message.reply_text(
+                    "❌ Это не похоже на чек об оплате.\n\n"
+                    "Пришлите *чек или подтверждение оплаты* 🧾",
+                    parse_mode="Markdown"
+                )
+            elif reason.startswith("wrong_amount"):
+                found = reason.split(":")[-1].strip()
+                if ADMIN_CHAT_ID:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=f"⚠️ Чек (PDF) от гостя {username}\n\n"
+                             f"Сумма в чеке: {found} руб.\n"
+                             f"Запрошенная сумма: {expected_amount} руб.\n\n"
+                             f"❌ СУММЫ НЕ СОВПАДАЮТ\n\nЧек 👇"
+                    )
+                    await context.bot.forward_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        from_chat_id=update.effective_chat.id,
+                        message_id=update.message.message_id
+                    )
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
+                        InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
+                    ]])
+                    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Подтвердите получение оплаты:", reply_markup=keyboard)
+                guest_states[user_id] = "waiting_admin_confirmation"
+                await update.message.reply_text(
+                    "⚠️ Сумма в чеке не совпадает. Чек передан администратору. ⏱"
+                )
+            return
+
+        if ADMIN_CHAT_ID:
+            expected_str = f"{expected_amount} руб." if expected_amount else "не определена"
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"🧾 Чек (PDF) от гостя {username}\n\n"
+                     f"Запрошенная сумма: {expected_str}\n✅ Сумма совпадает\n\nЧек 👇"
+            )
+            await context.bot.forward_message(
+                chat_id=ADMIN_CHAT_ID,
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id
+            )
+
+        context.user_data["has_payment"] = True
+        if has_passport:
+            await _finalize_docs(update, context, user_id, username)
+        else:
+            await update.message.reply_text("✅ Чек принят!\n\nТеперь пришлите фото паспорта 📄")
+            guest_states[user_id] = "waiting_docs"
+
+    else:
+        await update.message.reply_text(
+            "❌ Не удалось определить документ.\n\n"
+            "Пожалуйста пришлите:\n"
+            "📄 Паспорт (фото или PDF)\n"
+            "🧾 Чек об оплате (фото или PDF)"
+        )
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = update.effective_user
@@ -1444,6 +1621,7 @@ app.add_handler(CommandHandler("delnote", delete_note))
 app.add_handler(CommandHandler("delobj", delete_object))
 app.add_handler(CallbackQueryHandler(handle_apartment_selection))
 app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 print("Бот запущен!")
