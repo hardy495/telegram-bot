@@ -384,6 +384,8 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
                      "Для завершения оформления пришлите пожалуйста фото паспорта (лицевая сторона) 📄"
             )
             guest_states[guest_id] = "waiting_docs"
+            # Сохраняем что оплата подтверждена
+            guest_docs.setdefault(guest_id, {})["has_payment"] = True
             await query.edit_message_text("✅ Оплата подтверждена! Ожидаем паспорт от гостя.")
             return
 
@@ -609,7 +611,7 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = ""
         date_from = ""
         date_to = ""
-        amount = 0
+        amount = None  # None = не найдено, 0 = специально указан ноль
 
         for line in raw.split("\n"):
             line = line.strip()
@@ -625,7 +627,7 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
-        if not name or not amount:
+        if not name or amount is None:
             await update.message.reply_text(
                 "Не удалось распознать имя или сумму.\n"
                 "Пример: /b Елена с 01.02 по 05.02 8000"
