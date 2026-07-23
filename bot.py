@@ -492,19 +492,17 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
                 parse_mode="Markdown"
             )
 
-        # Просим гостя оставить обратную связь и реквизиты для залога
+        # Просим сначала реквизиты, потом обратную связь
         await query.edit_message_reply_markup(reply_markup=None)
         await context.bot.send_message(
             chat_id=guest_id,
             text="Спасибо что выбрали *Alekseev Apartments!* 🙏\n\n"
-                 "Пожалуйста, дайте нам обратную связь здесь в чате — "
-                 "ваше мнение очень важно для нас! 😊\n\n"
-                 "А также для возврата залога пришлите ваши реквизиты в формате:\n\n"
+                 "Для возврата залога пришлите пожалуйста ваши реквизиты:\n\n"
                  "_Номер телефона / Банк / ФИО получателя_\n\n"
                  "_Например: +79001234567 / Сбербанк / Иванов Иван Иванович_",
             parse_mode="Markdown"
         )
-        guest_states[guest_id] = "waiting_review_and_requisites"
+        guest_states[guest_id] = "waiting_requisites"
 
     # Кнопка "Продление/Новая бронь"
     elif query.data.startswith("newbooking_"):
@@ -1650,6 +1648,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "В ближайшее время с вами свяжется оператор по вопросу бронирования. ⏱"
         )
         guest_states[user_id] = "verified"
+        return
+
+    if state == "waiting_requisites":
+        # Гость прислал реквизиты — пересылаем администратору
+        apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
+        username = f"@{user.username}" if user.username else f"{user.first_name}"
+
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"💳 *Реквизиты для возврата залога*\n\n"
+                     f"Апартамент: *{apt_name}*\n"
+                     f"Гость: {username}\n\n"
+                     f"Реквизиты:\n{user_text}",
+                parse_mode="Markdown"
+            )
+        # Благодарим и просим оставить обратную связь
+        await update.message.reply_text(
+            "Благодарим вас за реквизиты! ✅\n\n"
+            "Залог вернём сегодня до 00:00.\n\n"
+            "Будем рады если вы оставите нам обратную связь здесь в чате — "
+            "ваше мнение очень важно для нас! 😊",
+            parse_mode="Markdown"
+        )
+        guest_states[user_id] = "waiting_feedback"
+        return
+
+    if state == "waiting_feedback":
+        # Гость прислал обратную связь
+        apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
+        username = f"@{user.username}" if user.username else f"{user.first_name}"
+
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"⭐ *Обратная связь от гостя*\n\n"
+                     f"Апартамент: *{apt_name}*\n"
+                     f"Гость: {username}\n\n"
+                     f"{user_text}",
+                parse_mode="Markdown"
+            )
+        await update.message.reply_text(
+            "Спасибо за обратную связь! 🙏\n\n"
+            "Будем рады видеть вас снова в *Alekseev Apartments!* 🏠",
+            parse_mode="Markdown"
+        )
+        guest_states[user_id] = "checkout_done"
         return
 
     if state == "waiting_review_and_requisites":
