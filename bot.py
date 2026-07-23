@@ -25,6 +25,9 @@ guest_extension_days = {}
 # Связь имя гостя -> user_id для автоматической отправки реквизитов
 guest_name_to_id = {}
 
+# Единое хранилище документов гостей: user_id -> {has_passport, has_payment}
+guest_docs = {}
+
 # Храним брони: ключ -> {name, date_from, date_to, amount}
 # Ключ: "имя_дата_заезда" для уникальности
 guest_balances = {}
@@ -333,7 +336,7 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
     # Кнопка "Это паспорт" для PDF
     elif query.data.startswith("pdf_passport_"):
         guest_id = int(query.data.split("_")[2])
-        context.bot_data.setdefault("pdf_docs", {}).setdefault(guest_id, {})["has_passport"] = True
+        guest_docs.setdefault(guest_id, {})["has_passport"] = True
         guest_states[guest_id] = "waiting_docs"
         await context.bot.send_message(
             chat_id=guest_id,
@@ -344,10 +347,8 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
     # Кнопка "Это чек" для PDF
     elif query.data.startswith("pdf_check_"):
         guest_id = int(query.data.split("_")[2])
-        pdf_docs = context.bot_data.setdefault("pdf_docs", {}).setdefault(guest_id, {})
-        has_passport = pdf_docs.get("has_passport", False) or context.bot_data.get("has_passport_" + str(guest_id), False)
-        pdf_docs["has_payment"] = True
-        context.bot_data["has_payment_" + str(guest_id)] = True
+        has_passport = guest_docs.get(guest_id, {}).get("has_passport", False)
+        guest_docs.setdefault(guest_id, {})["has_payment"] = True
 
         if has_passport:
             guest_states[guest_id] = "waiting_admin_confirmation"
@@ -373,16 +374,10 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         guest_id = int(query.data.split("_")[1])
         admin_chat_id = str(query.message.chat_id)
 
-        # Проверяем есть ли паспорт от гостя
-        has_passport = context.bot_data.get(f"has_passport_{guest_id}", False)
-
-        # Также проверяем через guest_states контекст
-        # Ищем в bot_data напрямую
-        guest_pdf_docs = context.bot_data.get("pdf_docs", {}).get(guest_id, {})
-        has_passport = has_passport or guest_pdf_docs.get("has_passport", False)
+        # Проверяем есть ли паспорт от гостя через единый guest_docs
+        has_passport = guest_docs.get(guest_id, {}).get("has_passport", False)
 
         if not has_passport:
-            # Паспорта нет — просим гостя прислать
             await context.bot.send_message(
                 chat_id=guest_id,
                 text="✅ Оплата подтверждена!\n\n"
@@ -556,6 +551,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     guest_states[user_id] = "asking_name"
     conversation_history[user_id] = []
+    guest_docs[user_id] = {}  # Сбрасываем документы при новой брони
     await update.message.reply_text(
         "Здравствуйте! 👋 Добро пожаловать в *Alekseev Apartments!*\n\n"
         "Для того чтобы найти ваше бронирование в системе, пришлите пожалуйста "
@@ -657,22 +653,42 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if guest_id:
             guest_states[guest_id] = "waiting_docs"
-            await context.bot.send_message(
-                chat_id=guest_id,
-                text=f"✅ Бронь найдена!\n\n"
-                     f"🔑 *Заселение у нас дистанционное* — вы заселяетесь самостоятельно через минисейф. "
-                     f"Все инструкции, пароли и адрес придут после подтверждения оплаты.\n\n"
-                     f"Для оформления нам потребуется:\n\n"
-                     f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
-                     f"💰 Чек об оплате по реквизитам:\n\n"
-                     f"• Остаток по бронированию: *{amount} руб.*\n"
-                     f"• Залог: *{DEPOSIT} руб.* _(возвращается в день выезда до конца дня)_\n"
-                     f"• *Итого: {total} руб.*\n\n"
-                     f"{PAYMENT_INFO}\n\n"
-                     f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.",
-                parse_mode="Markdown"
+
+            if amount == 0:
+                # Гость всё оплатил — нужен только залог и паспорт
+                await context.bot.send_message(
+                    chat_id=guest_id,
+                    text=f"✅ Бронь найдена!\n\n"
+                         f"Отличные новости — вы уже полностью оплатили бронирование! 🎉\n\n"
+                         f"🔑 *Заселение у нас дистанционное* — вы заселяетесь самостоятельно через минисейф. "
+                         f"Все инструкции, пароли и адрес придут после подтверждения.\n\n"
+                         f"Для оформления нам потребуется:\n\n"
+                         f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
+                         f"💰 Залог: *{DEPOSIT} руб.* _(возвращается в день выезда до конца дня)_\n\n"
+                         f"{PAYMENT_INFO}\n\n"
+                         f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=guest_id,
+                    text=f"✅ Бронь найдена!\n\n"
+                         f"🔑 *Заселение у нас дистанционное* — вы заселяетесь самостоятельно через минисейф. "
+                         f"Все инструкции, пароли и адрес придут после подтверждения оплаты.\n\n"
+                         f"Для оформления нам потребуется:\n\n"
+                         f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
+                         f"💰 Чек об оплате по реквизитам:\n\n"
+                         f"• Остаток по бронированию: *{amount} руб.*\n"
+                         f"• Залог: *{DEPOSIT} руб.* _(возвращается в день выезда до конца дня)_\n"
+                         f"• *Итого: {total} руб.*\n\n"
+                         f"{PAYMENT_INFO}\n\n"
+                         f"⚠️ При переводе *ничего не пишите* в комментарии к платежу.",
+                    parse_mode="Markdown"
+                )
+            await update.message.reply_text(
+                f"✅ {name} | {date_from}–{date_to} | "
+                f"{'только залог' if amount == 0 else str(total) + ' руб.'} → отправлено гостю"
             )
-            await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → отправлено гостю")
         else:
             await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → сохранено")
 
@@ -821,8 +837,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         doc_type = detect_response.content[0].text.strip().upper()
 
-        has_passport = context.user_data.get("has_passport", False)
-        has_payment = context.user_data.get("has_payment", False)
+        has_passport = guest_docs.get(user_id, {}).get("has_passport", False)
+        has_payment = guest_docs.get(user_id, {}).get("has_payment", False)
 
         if "ПАСПОРТ" in doc_type:
             if has_passport:
@@ -839,8 +855,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     from_chat_id=update.effective_chat.id,
                     message_id=update.message.message_id
                 )
-            context.user_data["has_passport"] = True
-            context.bot_data[f"has_passport_{user_id}"] = True
+            guest_docs.setdefault(user_id, {})["has_passport"] = True
             if has_payment:
                 await _finalize_docs(update, context, user_id, username)
             else:
@@ -860,7 +875,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name_match = data["name_lower"] in guest_name or guest_name in data["name_lower"]
                 date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
                 if name_match and date_match:
-                    expected_amount = data["amount"] + DEPOSIT
+                    expected_amount = DEPOSIT if data["amount"] == 0 else data["amount"] + DEPOSIT
                     break
 
             if expected_amount:
@@ -921,7 +936,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     from_chat_id=update.effective_chat.id,
                     message_id=update.message.message_id
                 )
-            context.user_data["has_payment"] = True
+            guest_docs.setdefault(user_id, {})["has_payment"] = True
             if has_passport:
                 await _finalize_docs(update, context, user_id, username)
             else:
@@ -953,8 +968,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     doc_type = detect_response.content[0].text.strip().upper()
 
-    has_passport = context.user_data.get("has_passport", False)
-    has_payment = context.user_data.get("has_payment", False)
+    has_passport = guest_docs.get(user_id, {}).get("has_passport", False)
+    has_payment = guest_docs.get(user_id, {}).get("has_payment", False)
 
     if "ПАСПОРТ" in doc_type:
         if has_passport:
@@ -971,8 +986,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from_chat_id=update.effective_chat.id,
                 message_id=update.message.message_id
             )
-        context.user_data["has_passport"] = True
-        context.bot_data[f"has_passport_{user_id}"] = True
+        guest_docs.setdefault(user_id, {})["has_passport"] = True
         if has_payment:
             await _finalize_docs(update, context, user_id, username)
         else:
@@ -991,7 +1005,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name_match = data["name_lower"] in guest_name or guest_name in data["name_lower"]
             date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
             if name_match and date_match:
-                expected_amount = data["amount"] + DEPOSIT
+                expected_amount = DEPOSIT if data["amount"] == 0 else data["amount"] + DEPOSIT
                 break
 
         is_valid, reason = await analyze_photo_with_ai(bytes(file_bytes), "payment", expected_amount)
@@ -1042,7 +1056,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=update.message.message_id
             )
 
-        context.user_data["has_payment"] = True
+        guest_docs.setdefault(user_id, {})["has_payment"] = True
         if has_passport:
             await _finalize_docs(update, context, user_id, username)
         else:
@@ -1089,8 +1103,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc_type = detect_response.content[0].text.strip().upper()
 
     # Определяем что уже получено от гостя
-    has_passport = context.user_data.get("has_passport", False)
-    has_payment = context.user_data.get("has_payment", False)
+    has_passport = guest_docs.get(user_id, {}).get("has_passport", False)
+    has_payment = guest_docs.get(user_id, {}).get("has_payment", False)
 
     if "ПАСПОРТ" in doc_type:
         if has_passport:
@@ -1108,8 +1122,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from_chat_id=update.effective_chat.id,
                 message_id=update.message.message_id
             )
-        context.user_data["has_passport"] = True
-        context.bot_data[f"has_passport_{user_id}"] = True
+        guest_docs.setdefault(user_id, {})["has_passport"] = True
         if has_payment:
             # Оба документа получены
             await _finalize_docs(update, context, user_id, username)
@@ -1130,7 +1143,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name_match = data["name_lower"] in guest_name or guest_name in data["name_lower"]
             date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
             if name_match and date_match:
-                expected_amount = data["amount"] + DEPOSIT
+                expected_amount = DEPOSIT if data["amount"] == 0 else data["amount"] + DEPOSIT
                 break
 
         is_valid, reason = await analyze_photo_with_ai(bytes(photo_bytes), "payment", expected_amount)
@@ -1190,7 +1203,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=update.message.message_id
             )
 
-        context.user_data["has_payment"] = True
+        guest_docs.setdefault(user_id, {})["has_payment"] = True
         if has_passport:
             await _finalize_docs(update, context, user_id, username)
         else:
