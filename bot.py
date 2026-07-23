@@ -544,7 +544,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Привет! Вы вошли как администратор 👋\n\n"
             "Команды:\n"
             "/admin — активировать уведомления\n"
-            "/balance ФИО сумма — установить остаток по бронированию\n"
+            "/b ФИО сумма — установить остаток по бронированию\n"
             "/remember текст — запомнить информацию\n"
             "/add название | инфо — добавить апартамент\n"
             "/list — база знаний\n"
@@ -585,7 +585,7 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_text = " ".join(context.args) if context.args else ""
     if not full_text:
         await update.message.reply_text(
-            "Пример:\n/balance Елена с 01.02 по 05.02 8000"
+            "Пример:\n/b Елена с 01.02 по 05.02 8000"
         )
         return
 
@@ -632,7 +632,7 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not name or not amount:
             await update.message.reply_text(
                 "Не удалось распознать имя или сумму.\n"
-                "Пример: /balance Елена с 01.02 по 05.02 8000"
+                "Пример: /b Елена с 01.02 по 05.02 8000"
             )
             return
 
@@ -677,7 +677,7 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → сохранено")
 
     except Exception as e:
-        await update.message.reply_text("Не удалось распознать. Пример:\n/balance Елена с 01.02 по 05.02 8000")
+        await update.message.reply_text("Не удалось распознать. Пример:\n/b Елена с 01.02 по 05.02 8000")
 
 
 async def remember(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1325,7 +1325,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Команды:\n"
             "/admin — активировать уведомления\n"
-            "/balance ФИО сумма — установить остаток по брони\n"
+            "/b ФИО сумма — установить остаток по брони\n"
             "/remember текст — запомнить информацию\n"
             "/add название | инфо — добавить апартамент\n"
             "/list — база знаний\n"
@@ -1832,7 +1832,7 @@ app = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", set_admin_id))
-app.add_handler(CommandHandler("balance", set_balance))
+app.add_handler(CommandHandler("b", set_balance))
 app.add_handler(CommandHandler("remember", remember))
 app.add_handler(CommandHandler("add", add_object))
 app.add_handler(CommandHandler("list", list_knowledge))
