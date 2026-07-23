@@ -1764,8 +1764,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if state == "checkout_done":
         await update.message.reply_text(
-            "Спасибо что были с нами! 😊\n"
-            "Если захотите забронировать снова — напишите нам!"
+            "Рады слышать вас! 😊\n\n"
+            "Для новой брони позвоните на горячую линию:\n"
+            "📞 *+7 918 148 00 45*\n\n"
+            "Дождитесь ответа оператора — он поможет с бронированием!",
+            parse_mode="Markdown"
         )
         return
 
@@ -1814,12 +1817,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guest_states[user_id] = "waiting_time_late"
         await ask_guest_time(update, "late")
     elif "[ПРОДЛЕНИЕ]" in reply:
-        guest_states[user_id] = "waiting_extension_days"
+        # Показываем кнопку продления рядом с инструкцией и номер горячей линии
+        extension_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Продление/Новая бронь", callback_data=f"newbooking_{user_id}")]
+        ])
         await update.message.reply_text(
-            "🔄 *Продление проживания*\n\n"
-            "На сколько суток вы хотели бы продлить?\n"
-            "_(например: 1 или 2)_",
-            parse_mode="Markdown"
+            "Для продления проживания у вас два варианта:\n\n"
+            "1️⃣ Нажмите кнопку ниже и укажите даты — мы свяжемся с вами\n\n"
+            "2️⃣ Позвоните на горячую линию: *+7 918 148 00 45* и дождитесь ответа оператора 📞",
+            parse_mode="Markdown",
+            reply_markup=extension_keyboard
         )
     elif "[ПАРКОВКА_КРАСНАЯ]" in reply:
         parking_keyboard = InlineKeyboardMarkup([
