@@ -116,7 +116,7 @@ async def notify_admin_max(bot_instance, question, user_id, username):
 @dp.bot_started()
 async def on_start(event: BotStarted):
     user_id = event.message.sender.user_id
-    username = event.message.sender.name or str(user_id)
+    username = getattr(event.message.sender, "name", None) or getattr(event.message.sender, "username", None) or getattr(event.message.sender, "first_name", None) or str(user_id)
 
     guest_states_max[user_id] = "asking_name"
     conversation_history_max[user_id] = []
@@ -133,7 +133,7 @@ async def on_start(event: BotStarted):
 @dp.message_created()
 async def on_message(event: MessageCreated):
     user_id = event.message.sender.user_id
-    username = event.message.sender.name or str(user_id)
+    username = getattr(event.message.sender, "name", None) or getattr(event.message.sender, "username", None) or getattr(event.message.sender, "first_name", None) or str(user_id)
     text = event.message.body.text if event.message.body else ""
 
     if not text:
