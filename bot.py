@@ -531,6 +531,7 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         guest_states[guest_id] = "waiting_new_booking_dates"
 
 
+async def ask_guest_time(update, request_type):
     if request_type == "early":
         await update.message.reply_text(
             "🕐 *Ранний заезд*\n\n"
