@@ -591,6 +591,71 @@ async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        return
+    full_text = " ".join(context.args) if context.args else ""
+    if not full_text:
+        await update.message.reply_text("Пример: /b Иванов Иван с 01.07 по 05.07 3500")
+        return
+
+    from datetime import date as date_cls
+    today_str = date_cls.today().strftime("%d.%m.%Y")
+    parse_response = claude.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=150,
+        messages=[{"role": "user", "content":
+            f"Сегодня {today_str}. Из текста извлеки данные бронирования.\n"
+            f"Текст: \"{full_text}\"\n\n"
+            f"ИМЯ: (имя)\nЗАЕЗД: (дата ДД.ММ)\nВЫЕЗД: (дата ДД.ММ)\nСУММА: (только число)\n\n"
+            f"Если написано сегодня={today_str}. Сумма — последнее число."}]
+    )
+    raw = parse_response.content[0].text.strip()
+    name, date_from, date_to, amount = "", "", "", None
+    for line in raw.split("\n"):
+        if line.upper().startswith("ИМЯ:"): name = line.split(":", 1)[-1].strip()
+        elif line.upper().startswith("ЗАЕЗД:"): date_from = line.split(":", 1)[-1].strip()
+        elif line.upper().startswith("ВЫЕЗД:"): date_to = line.split(":", 1)[-1].strip()
+        elif line.upper().startswith("СУММА:"):
+            try: amount = int(line.split(":", 1)[-1].strip().replace(" ", ""))
+            except: pass
+
+    if not name or amount is None:
+        await update.message.reply_text("Не удалось распознать.\nПример: /b Иванов Иван с 01.07 по 05.07 3500")
+        return
+
+    total = DEPOSIT if amount == 0 else amount + DEPOSIT
+    key = f"{name.lower()}_{date_from}"
+    guest_balances[key] = {"name": name, "name_lower": name.lower(),
+                           "date_from": date_from, "date_to": date_to, "amount": amount}
+    save_balances_to_file(guest_balances)
+
+    # Ищем гостя в MAX который ждёт эту бронь
+    for max_uid, winfo in list(max_waiting.items()):
+        wname = winfo.get("name", "").lower()
+        if set(name.lower().split()) & set(wname.split()):
+            if amount == 0:
+                msg = (f"✅ Бронь найдена!\n\nВы уже полностью оплатили! 🎉\n\n"
+                       f"Заселение дистанционное — через минисейф.\n\n"
+                       f"Для оформления:\n📄 Фото паспорта\n💰 Залог: {DEPOSIT} руб.\n\n"
+                       f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии.")
+            else:
+                msg = (f"✅ Бронь найдена!\n\nЗаселение дистанционное — через минисейф.\n\n"
+                       f"Для оформления:\n📄 Фото паспорта\n"
+                       f"💰 Остаток: {amount} руб.\n💰 Залог: {DEPOSIT} руб.\n💰 Итого: {total} руб.\n\n"
+                       f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии.")
+            max_states[max_uid] = "waiting_docs"
+            max_docs[max_uid] = {}
+            import asyncio as _aio
+            if _max_loop:
+                _aio.run_coroutine_threadsafe(max_send(max_uid, msg), _max_loop)
+            del max_waiting[max_uid]
+            await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → отправлено гостю в MAX!")
+            return
+
+    await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → сохранено")
+
+
 async def maxapt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправить информацию по апартаменту гостю в MAX: /maxapt user_id название"""
     if not is_admin(update.effective_user):
