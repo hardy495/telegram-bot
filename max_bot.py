@@ -43,10 +43,15 @@ def load_admin_chat_id():
     return None
 
 def load_balances():
+    """Загружаем балансы из balances.json"""
+    result = {}
     if os.path.exists(BALANCES_FILE):
-        with open(BALANCES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+        try:
+            with open(BALANCES_FILE, "r", encoding="utf-8") as f:
+                result = json.load(f)
+        except:
+            pass
+    return result
 
 def get_all_knowledge():
     memory = load_memory()
@@ -63,17 +68,26 @@ def get_all_knowledge():
             text += f"{i}. {note}\n"
     return text if text else "База знаний пока пуста."
 
+def get_admin_id():
+    """Берём ADMIN_CHAT_ID из переменной окружения"""
+    return os.getenv("ADMIN_CHAT_ID")
+
 async def send_to_telegram_admin(text, parse_mode=None):
     """Отправить сообщение администратору в Telegram"""
-    admin_chat_id = load_admin_chat_id()
+    admin_chat_id = get_admin_id()
     if not admin_chat_id or not TELEGRAM_TOKEN:
+        print(f"[MAX] Не могу отправить в TG: admin={admin_chat_id}, token={'есть' if TELEGRAM_TOKEN else 'нет'}", flush=True)
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": admin_chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
-    async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload)
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, json=payload)
+            print(f"[MAX] TG отправка: {resp.status_code}", flush=True)
+    except Exception as e:
+        print(f"[MAX] Ошибка TG: {e}", flush=True)
 
 async def forward_photo_to_telegram(file_url, caption):
     """Переслать фото администратору в Telegram"""
