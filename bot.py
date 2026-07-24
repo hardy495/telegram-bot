@@ -57,8 +57,8 @@ def load_admin_chat_id():
     return None
 
 def get_admin_chat_id():
-    """Всегда читаем актуальный ADMIN_CHAT_ID из файла"""
-    return load_admin_chat_id() or ADMIN_CHAT_ID
+    """Возвращает ADMIN_CHAT_ID из переменной окружения или памяти"""
+    return ADMIN_CHAT_ID or os.getenv("ADMIN_CHAT_ID")
 
 
     """Сохранить ADMIN_CHAT_ID в файл"""
@@ -582,7 +582,6 @@ async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global ADMIN_CHAT_ID
     ADMIN_CHAT_ID = str(update.effective_chat.id)
-    save_admin_chat_id(ADMIN_CHAT_ID)
     await update.message.reply_text(
         "✅ Уведомления активированы!\n\n"
         "Когда гость задаёт вопрос — бот пришлёт уведомление.\n"
