@@ -662,6 +662,35 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         save_balances_to_file(guest_balances)
 
+        # Ищем гостя в MAX который ждёт эту бронь
+        for max_uid, guest_info in list(max_waiting_guests.items()):
+            guest_name_lower = guest_info.get("name", "").lower()
+            name_words = set(name.lower().split())
+            guest_words = set(guest_name_lower.split())
+            if name_words & guest_words:
+                # Нашли — отправляем гостю в MAX
+                total_msg = DEPOSIT if amount == 0 else amount + DEPOSIT
+                if amount == 0:
+                    msg = (f"✅ Бронь найдена!\n\nВы уже всё оплатили! 🎉\n\n"
+                           f"Заселение дистанционное — через минисейф.\n\n"
+                           f"Для оформления:\n📄 Фото паспорта\n"
+                           f"💰 Залог: {DEPOSIT} руб.\n\n{PAYMENT_INFO}\n\n"
+                           f"При переводе ничего не пишите в комментарии.")
+                else:
+                    msg = (f"✅ Бронь найдена!\n\nЗаселение дистанционное — через минисейф.\n\n"
+                           f"Для оформления:\n📄 Фото паспорта\n"
+                           f"💰 Остаток: {amount} руб.\n💰 Залог: {DEPOSIT} руб.\n"
+                           f"💰 Итого: {total_msg} руб.\n\n{PAYMENT_INFO}\n\n"
+                           f"При переводе ничего не пишите в комментарии.")
+                max_states[max_uid] = "waiting_docs"
+                import asyncio as _asyncio
+                _asyncio.run_coroutine_threadsafe(
+                    send_to_max_guest(max_uid, msg),
+                    _max_loop
+                )
+                del max_waiting_guests[max_uid]
+                break
+
         # Ищем гостя в активных сессиях
         guest_id = None
         for saved_name, uid in guest_name_to_id.items():
@@ -1885,12 +1914,30 @@ app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+# Глобальные переменные для взаимодействия между TG и MAX ботами
+max_states = {}
+max_hist = {}
+max_bot_instance = None
+max_waiting_guests = {}  # user_id -> {name, date_from, date_to}
+_max_loop = None
+
+async def send_to_max_guest(user_id, text):
+    """Отправить сообщение гостю в MAX"""
+    global max_bot_instance
+    if not max_bot_instance:
+        return
+    try:
+        await max_bot_instance.send_message(chat_id=user_id, text=text)
+    except Exception as e:
+        print(f"[MAX] Ошибка отправки гостю: {e}", flush=True)
+
 print("Бот запущен!")
 
 # Запускаем MAX бота в отдельном потоке
 import threading
 
 def start_max_bot():
+    global max_bot_instance
     try:
         import asyncio
         from maxapi import Bot as MaxBot, Dispatcher as MaxDisp
@@ -1917,9 +1964,8 @@ def start_max_bot():
                 print(f"[MAX] TG ошибка: {e}", flush=True)
 
         max_bot = MaxBot(MAX_TOKEN)
+        max_bot_instance = max_bot
         max_dp = MaxDisp()
-        max_states = {}
-        max_hist = {}
 
         def uname(s):
             return getattr(s,'name',None) or getattr(s,'username',None) or str(getattr(s,'user_id','?'))
@@ -1993,9 +2039,14 @@ def start_max_bot():
                     return
                 bd = await find_bal(name, dfrom)
                 if not bd:
-                    await tg_notify(f"🆕 Гость (MAX): {un}\nИмя: {name} | {dfrom}-{dto}\nБронь не найдена.")
+                    await tg_notify(f"🆕 Гость (MAX): {un}\nИмя: {name} | {dfrom}-{dto}\nБронь не найдена. Добавьте: /b {name} с {dfrom} по {dto} СУММА")
                     max_states[uid] = "waiting_balance"
-                    await event.message.answer(f"Бронирование на имя {name} не найдено.\n\nПроверьте имя и даты и напишите снова.\nНапример: Иванов Иван с 01.01 по 02.01")
+                    max_waiting_guests[uid] = {"name": name, "date_from": dfrom, "date_to": dto}
+                    await event.message.answer(
+                        f"Бронирование на имя {name} не найдено в системе.\n\n"
+                        f"Уточняем информацию — оператор свяжется с вами в течение 10 минут. ⏱\n\n"
+                        f"Если хотите — можете написать имя и даты ещё раз для повторной проверки."
+                    )
                     return
                 amt = bd["amount"]
                 total = DEPOSIT if amt==0 else amt+DEPOSIT
@@ -2037,7 +2088,11 @@ def start_max_bot():
                 await event.message.answer(reply)
 
         print("MAX бот запущен!", flush=True)
-        asyncio.run(max_dp.start_polling(max_bot))
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        global _max_loop
+        _max_loop = loop
+        loop.run_until_complete(max_dp.start_polling(max_bot))
     except Exception as e:
         print(f"[MAX] Ошибка: {e}", flush=True)
 
