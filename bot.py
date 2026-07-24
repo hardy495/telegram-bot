@@ -1884,4 +1884,161 @@ app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 print("Бот запущен!")
+
+# Запускаем MAX бота в отдельном потоке
+import threading
+
+def start_max_bot():
+    try:
+        import asyncio
+        from maxapi import Bot as MaxBot, Dispatcher as MaxDisp
+        from maxapi.types import MessageCreated as MsgCreated, BotStarted as BotStart
+
+        MAX_TOKEN = os.getenv("MAX_TOKEN")
+        if not MAX_TOKEN:
+            print("MAX_TOKEN не задан — MAX бот не запущен")
+            return
+
+        import httpx
+        import re as re_module
+
+        async def tg_notify(text):
+            aid = os.getenv("ADMIN_CHAT_ID")
+            tok = os.getenv("TELEGRAM_TOKEN")
+            if not aid or not tok:
+                return
+            try:
+                async with httpx.AsyncClient() as c:
+                    await c.post(f"https://api.telegram.org/bot{tok}/sendMessage",
+                                 json={"chat_id": aid, "text": text})
+            except Exception as e:
+                print(f"[MAX] TG ошибка: {e}", flush=True)
+
+        max_bot = MaxBot(MAX_TOKEN)
+        max_dp = MaxDisp()
+        max_states = {}
+        max_hist = {}
+
+        def uname(s):
+            return getattr(s,'name',None) or getattr(s,'username',None) or str(getattr(s,'user_id','?'))
+
+        async def find_bal(name, dfrom):
+            bals = load_balances_from_file()
+            if not bals:
+                return None
+            btext = "\n".join(f"{i+1}. {d['name']} {d['date_from']}-{d['date_to']}"
+                              for i,(k,d) in enumerate(bals.items()))
+            keys = list(bals.keys())
+            r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=5,
+                messages=[{"role":"user","content":f"Гость: '{name}' '{dfrom}'\n{btext}\nНомер или 0:"}])
+            try:
+                n = int(r.content[0].text.strip())
+                if 1 <= n <= len(keys):
+                    return bals[keys[n-1]]
+            except:
+                pass
+            return None
+
+        def mk_knowledge():
+            mem = load_memory()
+            t = ""
+            for nm, inf in mem.get("objects",{}).items():
+                t += f"\n--- {nm} ---\n{re_module.sub(r'<[^>]+>','',inf)}\n"
+            for nt in mem.get("notes",[]):
+                t += f"{nt}\n"
+            return t or "Пусто"
+
+        SYS = SYSTEM_PROMPT  # используем тот же промпт что и в Telegram
+
+        @max_dp.bot_started()
+        async def ms(event: BotStart):
+            uid = event.message.sender.user_id
+            max_states[uid] = "asking_name"
+            max_hist[uid] = []
+            await event.message.answer(
+                "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
+                "Напишите имя на которое оформлена бронь и даты:\n\n"
+                "Например: Иванов Иван с 01.01 по 02.01"
+            )
+
+        @max_dp.message_created()
+        async def mm(event: MsgCreated):
+            uid = event.message.sender.user_id
+            un = uname(event.message.sender)
+            text = event.message.body.text if event.message.body else ""
+            if not text:
+                return
+            state = max_states.get(uid)
+
+            if state is None:
+                max_states[uid] = "asking_name"
+                max_hist[uid] = []
+                await event.message.answer("Здравствуйте! 👋\n\nНапишите имя на которое оформлена бронь и даты:\nНапример: Иванов Иван с 01.01 по 02.01")
+                return
+
+            if state in ["asking_name", "waiting_balance"]:
+                pr = claude.messages.create(model="claude-sonnet-4-6", max_tokens=100,
+                    messages=[{"role":"user","content":f"Извлеки из текста:\"{text}\"\nИМЯ:\nЗАЕЗД:\nВЫЕЗД:"}])
+                name=dfrom=dto=""
+                for ln in pr.content[0].text.strip().split("\n"):
+                    if ln.upper().startswith("ИМЯ:"): name=ln.split(":",1)[-1].strip()
+                    elif ln.upper().startswith("ЗАЕЗД:"): dfrom=ln.split(":",1)[-1].strip()
+                    elif ln.upper().startswith("ВЫЕЗД:"): dto=ln.split(":",1)[-1].strip()
+                if not name:
+                    await event.message.answer("Напишите имя и даты:\nНапример: Иванов Иван с 01.01 по 02.01")
+                    return
+                bd = await find_bal(name, dfrom)
+                if not bd:
+                    await tg_notify(f"🆕 Гость (MAX): {un}\nИмя: {name} | {dfrom}-{dto}\nБронь не найдена.")
+                    max_states[uid] = "waiting_balance"
+                    await event.message.answer(f"Бронирование на имя {name} не найдено.\n\nПроверьте имя и даты и напишите снова.\nНапример: Иванов Иван с 01.01 по 02.01")
+                    return
+                amt = bd["amount"]
+                total = DEPOSIT if amt==0 else amt+DEPOSIT
+                max_states[uid] = "waiting_docs"
+                await tg_notify(f"🆕 Гость (MAX): {un}\n{name} | {dfrom}\n✅ Бронь найдена")
+                if amt == 0:
+                    await event.message.answer(f"✅ Бронь найдена!\n\nВы уже всё оплатили! 🎉\n\nДля оформления:\n📄 Фото паспорта\n💰 Залог: {DEPOSIT} руб.\n\n{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии.")
+                else:
+                    await event.message.answer(f"✅ Бронь найдена!\n\nЗаселение дистанционное — через минисейф.\n\nДля оформления:\n📄 Фото паспорта\n💰 Остаток: {amt} руб.\n💰 Залог: {DEPOSIT} руб.\n💰 Итого: {total} руб.\n\n{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии.")
+                return
+
+            if state == "waiting_docs":
+                await event.message.answer("Пришлите:\n📄 Фото паспорта\n🧾 Чек об оплате")
+                return
+            if state == "waiting_admin_confirmation":
+                await event.message.answer("⏱ На проверке. Свяжемся в течение 10 минут!")
+                return
+
+            if uid not in max_hist: max_hist[uid] = []
+            max_hist[uid].append({"role":"user","content":text})
+            if len(max_hist[uid])>20: max_hist[uid]=max_hist[uid][-20:]
+            rep = claude.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
+                system=SYS.format(knowledge=mk_knowledge()), messages=max_hist[uid])
+            reply = rep.content[0].text
+            if "[НУЖЕН_ОПЕРАТОР]" in reply:
+                await tg_notify(f"❓ Вопрос (MAX) от {un}:\n\n{text}")
+                await event.message.answer("Оператор свяжется в течение 10 минут.\n\nИли: 📞 +7 918 148 00 45")
+            elif "[ПРОДЛЕНИЕ]" in reply:
+                await tg_notify(f"🔄 Продление (MAX) от {un}:\n{text}")
+                await event.message.answer("Для продления: 📞 +7 918 148 00 45")
+            elif "[РАННИЙ_ЗАЕЗД]" in reply:
+                await tg_notify(f"🕐 Ранний заезд (MAX) от {un}:\n{text}")
+                await event.message.answer("Ранний заезд: 400 руб/час. Уточняю — отвечу в течение 10 минут! ⏱")
+            elif "[ПОЗДНИЙ_ВЫЕЗД]" in reply:
+                await tg_notify(f"🕐 Поздний выезд (MAX) от {un}:\n{text}")
+                await event.message.answer("Поздний выезд: 400 руб/час. Уточняю — отвечу в течение 10 минут! ⏱")
+            else:
+                max_hist[uid].append({"role":"assistant","content":reply})
+                await event.message.answer(reply)
+
+        print("MAX бот запущен!", flush=True)
+        asyncio.run(max_dp.start_polling(max_bot))
+    except Exception as e:
+        print(f"[MAX] Ошибка: {e}", flush=True)
+
+max_thread = threading.Thread(target=start_max_bot, daemon=True)
+max_thread.start()
+
 app.run_polling()
+
