@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import base64
 import anthropic
 from dotenv import load_dotenv
@@ -2070,10 +2071,10 @@ async def run_max_bot():
         print(f"MAX бот ошибка: {e}")
 
 async def main():
-    import asyncio
-    tg_task = asyncio.create_task(app.run_polling(close_loop=False))
-    max_task = asyncio.create_task(run_max_bot())
-    await asyncio.gather(tg_task, max_task)
+    await asyncio.gather(
+        app.run_polling(close_loop=False),
+        run_max_bot()
+    )
 
 if __name__ == "__main__":
     import asyncio
