@@ -325,6 +325,40 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
 
+    # Кнопка "Получил" для MAX гостя
+    if query.data.startswith("max_received_"):
+        max_guest_id = int(query.data.split("_")[2])
+        un = f"MAX гость {max_guest_id}"
+
+        memory = load_memory()
+        objects = memory.get("objects", {})
+        if not objects:
+            await query.edit_message_text("⚠️ База апартаментов пуста!")
+            return
+
+        buttons = []
+        for i, name in enumerate(objects.keys()):
+            buttons.append([InlineKeyboardButton(f"🏠 {name}", callback_data=f"maxapt_{max_guest_id}_{i}")])
+        keyboard = InlineKeyboardMarkup(buttons)
+        await query.edit_message_text(
+            f"✅ Оплата получена!\n\nВыберите апартамент для отправки гостю в MAX:",
+            reply_markup=keyboard
+        )
+        return
+
+    # Кнопка "Не получил" для MAX гостя
+    if query.data.startswith("max_not_received_"):
+        max_guest_id = int(query.data.split("_")[3])
+        max_states[max_guest_id] = "waiting_docs"
+        max_outbox[max_guest_id] = (
+            f"⚠️ Оплата не поступила.\n\n"
+            f"Пожалуйста, проверьте правильность перевода и пришлите чек повторно.\n\n"
+            f"Реквизиты:\n{PAYMENT_INFO}\n\n"
+            f"При переводе ничего не пишите в комментарии к платежу."
+        )
+        await query.edit_message_text("❌ Гость уведомлён — оплата не поступила.")
+        return
+
     # Кнопка выбора апартамента для MAX гостя
     if query.data.startswith("maxapt_"):
         parts = query.data.split("_")
@@ -2201,34 +2235,27 @@ def start_max_bot():
         cid = max_chat_ids.get(uid, uid)
         await max_send(uid, "✅ Все документы получены!\n\nДокументы переданы на проверку оплаты.\n⏱ Обычно до 10 минут.\n\nЕсли есть вопросы — я готов помочь! 😊")
 
-        # Отправляем администратору в Telegram кнопки апартаментов
+        # Отправляем кнопки "Получил / Не получил" администратору в Telegram
         admin_id = get_admin_chat_id()
         tg_tok = os.getenv("TELEGRAM_TOKEN")
         if admin_id and tg_tok:
-            memory = load_memory()
-            objects = memory.get("objects", {})
-            if objects:
-                # Формируем inline keyboard для Telegram
+            keyboard = {"inline_keyboard": [[
+                {"text": "✅ Получил", "callback_data": f"max_received_{uid}"},
+                {"text": "❌ Не получил", "callback_data": f"max_not_received_{uid}"}
+            ]]}
+            try:
                 import httpx as _hx
-                buttons = []
-                for i, name in enumerate(objects.keys()):
-                    buttons.append([{"text": f"🏠 {name}", "callback_data": f"maxapt_{uid}_{i}"}])
-                keyboard = {"inline_keyboard": buttons}
-                try:
-                    async with _hx.AsyncClient() as c:
-                        await c.post(
-                            f"https://api.telegram.org/bot{tg_tok}/sendMessage",
-                            json={
-                                "chat_id": admin_id,
-                                "text": f"✅ Все документы от гостя {un} (MAX) получены!\n\nВыберите апартамент для отправки информации:",
-                                "reply_markup": keyboard
-                            }
-                        )
-                except Exception as e:
-                    print(f"[MAX] Ошибка отправки кнопок: {e}", flush=True)
-                    await tg_admin(f"✅ Все документы от гостя {un} (MAX) получены!\nИспользуйте: /maxapt {uid} <номер>")
-            else:
-                await tg_admin(f"✅ Все документы от гостя {un} (MAX) получены!\n⚠️ База апартаментов пуста!")
+                async with _hx.AsyncClient() as c:
+                    await c.post(
+                        f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                        json={
+                            "chat_id": admin_id,
+                            "text": f"✅ Все документы от гостя {un} (MAX) получены!\n\nОплата получена?",
+                            "reply_markup": keyboard
+                        }
+                    )
+            except Exception as e:
+                print(f"[MAX] Ошибка кнопок: {e}", flush=True)
 
     @md.bot_started()
     async def ms(event: BS):
