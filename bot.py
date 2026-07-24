@@ -603,21 +603,23 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ИИ парсит свободный текст
+    from datetime import date as date_cls
+    today_str = date_cls.today().strftime("%d.%m.%Y")
     parse_response = claude.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=150,
         messages=[{
             "role": "user",
-            "content": f"""Из текста извлеки данные бронирования.
+            "content": f"""Сегодня {today_str}. Из текста извлеки данные бронирования.
 Текст: "{full_text}"
 
 Ответь строго в таком формате (каждое на новой строке):
 ИМЯ: (имя гостя)
-ЗАЕЗД: (дата заезда)
-ВЫЕЗД: (дата выезда)
+ЗАЕЗД: (дата в формате ДД.ММ или ДД.ММ.ГГГГ)
+ВЫЕЗД: (дата в формате ДД.ММ или ДД.ММ.ГГГГ)
 СУММА: (только число)
 
-Если дата или имя не указаны — оставь поле пустым. Сумма — последнее число в тексте."""
+Если написано 'сегодня' — используй {today_str}. Сумма — последнее число в тексте."""
         }]
     )
 
@@ -1977,8 +1979,10 @@ def start_max_bot():
                 return
 
             if state in ["asking_name", "waiting_balance"]:
-                pr = claude.messages.create(model="claude-sonnet-4-6", max_tokens=100,
-                    messages=[{"role":"user","content":f"Извлеки из текста:\"{text}\"\nИМЯ:\nЗАЕЗД:\nВЫЕЗД:"}])
+                from datetime import date
+                today = date.today().strftime("%d.%m.%Y")
+                pr = claude.messages.create(model="claude-sonnet-4-6", max_tokens=150,
+                    messages=[{"role":"user","content":f"Сегодня {today}. Извлеки из текста имя и даты бронирования.\nТекст: \"{text}\"\n\nОтветь строго в формате:\nИМЯ: (имя)\nЗАЕЗД: (дата в формате ДД.ММ или ДД.ММ.ГГГГ)\nВЫЕЗД: (дата в формате ДД.ММ или ДД.ММ.ГГГГ)\n\nЕсли написано 'сегодня' — используй {today}. Если 'завтра' — следующий день."}])
                 name=dfrom=dto=""
                 for ln in pr.content[0].text.strip().split("\n"):
                     if ln.upper().startswith("ИМЯ:"): name=ln.split(":",1)[-1].strip()
