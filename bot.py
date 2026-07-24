@@ -379,12 +379,58 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         import re
         clean_info = re.sub(r'<[^>]+>', '', apt_info)
 
-        # Отправляем гостю в MAX через очередь
         max_apt[max_guest_id] = apt_name
         max_states[max_guest_id] = "verified"
-        max_outbox[max_guest_id] = f"✅ Ваша оплата подтверждена!\n\n{clean_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊"
+
+        # Отправляем через очередь с кнопками
+        # Кнопки через Telegram API (inline keyboard для MAX не поддерживается напрямую)
+        # Сохраняем сообщение и кнопки через max_outbox
+        max_outbox[max_guest_id] = {
+            "text": f"✅ Ваша оплата подтверждена!\n\n{clean_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊",
+            "with_checkout_buttons": True,
+            "apt_name": apt_name
+        }
 
         await query.edit_message_text(f"✅ Информация по {apt_name} отправлена гостю в MAX!")
+        return
+
+    # Кнопка "Мы выехали" для MAX гостя
+    if query.data.startswith("max_checkout_"):
+        max_guest_id = int(query.data.split("_")[2])
+        apt_name = max_apt.get(max_guest_id, "апартамент")
+
+        await query.answer()
+        await query.edit_message_reply_markup(reply_markup=None)
+
+        # Уведомляем администратора
+        admin_id = get_admin_chat_id()
+        if admin_id:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=f"🚪 *{apt_name} — выехали* (MAX)",
+                parse_mode="Markdown"
+            )
+
+        max_states[max_guest_id] = "waiting_requisites"
+        max_outbox[max_guest_id] = {
+            "text": "Спасибо что выбрали Alekseev Apartments! 🙏\n\n"
+                    "Для возврата залога пришлите пожалуйста ваши реквизиты:\n\n"
+                    "Номер телефона / Банк / ФИО получателя\n\n"
+                    "Например: +79001234567 / Сбербанк / Иванов Иван Иванович"
+        }
+        return
+
+    # Кнопка "Продление/Новая бронь" для MAX гостя
+    if query.data.startswith("max_extend_"):
+        max_guest_id = int(query.data.split("_")[2])
+        await query.answer()
+        await query.edit_message_reply_markup(reply_markup=None)
+        max_states[max_guest_id] = "waiting_new_booking_dates_max"
+        max_outbox[max_guest_id] = {
+            "text": "Рады слышать вас! 🎉\n\n"
+                    "Укажите пожалуйста даты — с какой по какую дату вы хотите забронировать?\n\n"
+                    "Например: с 01.07 по 05.07"
+        }
         return
 
 
@@ -2432,6 +2478,42 @@ def start_max_bot():
             await event.message.answer("⏱ Документы на проверке.\nОбычно до 10 минут. Если есть вопросы — задавайте!")
             return
 
+
+            # Гость указал даты продления в MAX
+            await tg_admin(f"🔄 Запрос на продление/новую бронь (MAX)\nГость: {un}\nДаты: {text}")
+            await event.message.answer(
+                "Спасибо! 😊\n\nВ ближайшее время с вами свяжется оператор по вопросу бронирования. ⏱"
+            )
+            max_states[uid] = "verified"
+            return
+
+        if state == "waiting_requisites":
+            # Гость прислал реквизиты после выезда
+            apt_name = max_apt.get(uid, "неизвестный апартамент")
+            await tg_admin(f"💳 Реквизиты для возврата залога (MAX)\n\nАпартамент: {apt_name}\nГость: {un}\n\nРеквизиты:\n{text}")
+            await event.message.answer(
+                "Благодарим вас за реквизиты! 🙏\n\n"
+                "Залог вернём сегодня до 00:00. ✅\n\n"
+                "Оставьте пожалуйста обратную связь здесь в чате! 😊"
+            )
+            max_states[uid] = "waiting_feedback"
+            return
+
+        if state == "waiting_feedback":
+            apt_name = max_apt.get(uid, "неизвестный апартамент")
+            await tg_admin(f"⭐ Отзыв (MAX)\nАпартамент: {apt_name}\nГость: {un}\n\n{text}")
+            await event.message.answer(
+                "Спасибо за обратную связь! 🙏\n\nБудем рады видеть вас снова в Alekseev Apartments! 🏠"
+            )
+            max_states[uid] = "checkout_done_max"
+            return
+
+        if state == "checkout_done_max":
+            await event.message.answer("Рады слышать вас! 😊\n\nДля новой брони:\n📞 +7 918 148 00 45")
+            return
+
+
+
         if state == "waiting_requisites":
             await tg_admin(f"💳 Реквизиты (MAX)\nАпартамент: {max_apt.get(uid, '?')}\nГость: {un}\n\n{text}")
             await event.message.answer("Благодарим за реквизиты! ✅\n\nЗалог вернём сегодня до 00:00.\n\nОставьте пожалуйста обратную связь! 😊")
@@ -2501,15 +2583,34 @@ def start_max_bot():
         while True:
             await asyncio.sleep(2)
             if max_outbox:
-                for uid, msg in list(max_outbox.items()):
+                for uid, msg_data in list(max_outbox.items()):
                     try:
-                        # Используем chat_id если есть, иначе user_id
                         cid = max_chat_ids.get(uid, uid)
-                        await mb.send_message(chat_id=cid, text=msg)
+                        if isinstance(msg_data, dict):
+                            text = msg_data.get("text", "")
+                            if msg_data.get("with_checkout_buttons"):
+                                # Отправляем с кнопками выезда
+                                apt_name = msg_data.get("apt_name", "")
+                                from maxapi.keyboards import InlineKeyboard, CallbackButton
+                                kb = InlineKeyboard()
+                                kb.add(CallbackButton(text="🚪 Мы выехали", callback=f"max_checkout_{uid}"))
+                                kb.add(CallbackButton(text="🔄 Продление/Новая бронь", callback=f"max_extend_{uid}"))
+                                await mb.send_message(chat_id=cid, text=text, attachments=[kb])
+                            else:
+                                await mb.send_message(chat_id=cid, text=text)
+                        else:
+                            await mb.send_message(chat_id=cid, text=msg_data)
                         del max_outbox[uid]
                         print(f"[MAX] Сообщение отправлено гостю {cid}", flush=True)
                     except Exception as e:
                         print(f"[MAX] Ошибка очереди: {e}", flush=True)
+                        # Если кнопки не работают — отправляем без них
+                        try:
+                            cid = max_chat_ids.get(uid, uid)
+                            text = msg_data.get("text", str(msg_data)) if isinstance(msg_data, dict) else msg_data
+                            await mb.send_message(chat_id=cid, text=text)
+                        except:
+                            pass
                         del max_outbox[uid]
 
     async def run_all():
