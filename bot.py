@@ -2043,6 +2043,7 @@ max_guest_names = {} # user_id -> {name, date_from, date_to}
 max_waiting = {}     # user_id ждёт пока админ внесёт бронь
 max_apt = {}         # user_id -> название апартамента
 max_outbox = {}      # user_id -> сообщение которое нужно отправить
+max_chat_ids = {}    # user_id -> chat_id для отправки
 _max_loop = None
 max_bot_instance = None
 
@@ -2163,9 +2164,13 @@ def start_max_bot():
     @md.bot_started()
     async def ms(event: BS):
         uid = event.message.sender.user_id
+        # Сохраняем chat_id для отправки сообщений
+        chat_id = getattr(event.message, 'recipient', None)
+        chat_id = getattr(chat_id, 'chat_id', None) or uid
         max_states[uid] = "greeted"
         max_hist[uid] = []
         max_docs[uid] = {}
+        max_chat_ids[uid] = chat_id  # сохраняем chat_id
         await event.message.answer(
             "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
             "🔑 Заселение у нас дистанционное — вы заселяетесь самостоятельно через минисейф. "
@@ -2177,6 +2182,10 @@ def start_max_bot():
     @md.message_created()
     async def mm(event: MC):
         uid = event.message.sender.user_id
+        # Обновляем chat_id
+        chat_id = getattr(event.message, 'recipient', None)
+        chat_id = getattr(chat_id, 'chat_id', None) or uid
+        max_chat_ids[uid] = chat_id
         un = uname(event.message.sender)
         state = max_states.get(uid)
         body = event.message.body
@@ -2184,51 +2193,56 @@ def start_max_bot():
         # Обработка фото/документов
         if body and hasattr(body, 'attachments') and body.attachments:
             for att in body.attachments:
-                att_type = getattr(att, 'type', None)
                 att_url = getattr(att, 'url', None) or getattr(getattr(att, 'payload', None), 'url', None)
 
-                if att_url and state in ["waiting_docs", "verified", "asking_name", "waiting_balance"]:
-                    if state in ["asking_name", "waiting_balance"]:
-                        await event.message.answer("Спасибо! Сначала напишите имя и даты бронирования:\nНапример: Иванов Иван с 01.01 по 02.01")
-                        return
-
+                if att_url and state in ["waiting_docs", "verified"]:
                     try:
-                        import httpx as _hx, base64, imghdr
+                        import httpx as _hx, base64
                         async with _hx.AsyncClient() as hc:
                             img_resp = await hc.get(att_url)
                             img_bytes = img_resp.content
 
-                        # Определяем формат автоматически
-                        fmt = imghdr.what(None, h=img_bytes)
-                        if fmt == "jpeg" or fmt == "jpg":
-                            media_type = "image/jpeg"
-                        elif fmt == "png":
-                            media_type = "image/png"
-                        elif fmt == "webp":
+                        # Определяем формат по magic bytes
+                        if img_bytes[:4] == b'RIFF' and img_bytes[8:12] == b'WEBP':
                             media_type = "image/webp"
-                        elif fmt == "gif":
-                            media_type = "image/gif"
+                        elif img_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+                            media_type = "image/png"
+                        elif img_bytes[:3] == b'\xff\xd8\xff':
+                            media_type = "image/jpeg"
+                        elif img_bytes[:4] in (b'%PDF',):
+                            media_type = "application/pdf"
                         else:
-                            media_type = "image/jpeg"  # fallback
+                            media_type = "image/jpeg"
 
                         has_passport = max_docs.get(uid, {}).get("has_passport", False)
                         has_payment = max_docs.get(uid, {}).get("has_payment", False)
 
                         await event.message.answer("🔍 Проверяю документ...")
-                        is_passport = await analyze_image_max(img_bytes, "passport", media_type)
-                        is_check = not is_passport and await analyze_image_max(img_bytes, "payment", media_type)
+
+                        if media_type == "application/pdf":
+                            # PDF передаём как документ в Claude
+                            pdf_data = base64.standard_b64encode(img_bytes).decode()
+                            r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=10,
+                                messages=[{"role":"user","content":[
+                                    {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_data}},
+                                    {"type":"text","text":"Что в документе? Ответь только: ПАСПОРТ, ЧЕК или ДРУГОЕ"}
+                                ]}])
+                            doc_result = r.content[0].text.strip().upper()
+                            is_passport = "ПАСПОРТ" in doc_result
+                            is_check = "ЧЕК" in doc_result
+                        else:
+                            is_passport = await analyze_image_max(img_bytes, "passport", media_type)
+                            is_check = not is_passport and await analyze_image_max(img_bytes, "payment", media_type)
 
                         if is_passport and not has_passport:
-                            # Пересылаем паспорт администратору в Telegram
-                            await tg_admin(f"📄 Паспорт от гостя {un} (MAX) ✅\nФото: {att_url}")
+                            await tg_admin(f"📄 Паспорт от гостя {un} (MAX) ✅\n{att_url}")
                             max_docs.setdefault(uid, {})["has_passport"] = True
                             if max_docs[uid].get("has_payment"):
                                 await finalize_max_docs(uid, un)
                             else:
                                 await event.message.answer("✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾")
                         elif is_check and not has_payment:
-                            # Пересылаем чек администратору в Telegram
-                            await tg_admin(f"🧾 Чек от гостя {un} (MAX) ✅\nФото: {att_url}")
+                            await tg_admin(f"🧾 Чек от гостя {un} (MAX) ✅\n{att_url}")
                             max_docs.setdefault(uid, {})["has_payment"] = True
                             if max_docs[uid].get("has_passport"):
                                 await finalize_max_docs(uid, un)
@@ -2239,11 +2253,14 @@ def start_max_bot():
                         elif is_check and has_payment:
                             await event.message.answer("🧾 Чек уже получен. Пришлите паспорт 📄")
                         else:
-                            await event.message.answer("❌ Не могу определить документ.\nПришлите фото паспорта или чек об оплате.")
+                            await tg_admin(f"📎 Документ от гостя {un} (MAX) — не определён\n{att_url}")
+                            await event.message.answer("Документ передан администратору на проверку. ⏱")
                     except Exception as e:
                         print(f"[MAX] Фото ошибка: {e}", flush=True)
                         await tg_admin(f"📎 Файл от гостя {un} (MAX): {att_url}")
-                        await event.message.answer("Документ получен! Передан администратору на проверку. ⏱")
+                        await event.message.answer("Документ получен! Передан на проверку. ⏱")
+                elif att_url and state in ["asking_name", "waiting_balance"]:
+                    await event.message.answer("Пожалуйста сначала напишите имя и даты бронирования.")
                 elif att_url:
                     await event.message.answer("Спасибо за файл! Если есть вопросы — задавайте 😊")
             return
@@ -2390,11 +2407,13 @@ def start_max_bot():
             if max_outbox:
                 for uid, msg in list(max_outbox.items()):
                     try:
-                        await mb.send_message(chat_id=uid, text=msg)
+                        # Используем chat_id если есть, иначе user_id
+                        cid = max_chat_ids.get(uid, uid)
+                        await mb.send_message(chat_id=cid, text=msg)
                         del max_outbox[uid]
-                        print(f"[MAX] Сообщение из очереди отправлено гостю {uid}", flush=True)
+                        print(f"[MAX] Сообщение отправлено гостю {cid}", flush=True)
                     except Exception as e:
-                        print(f"[MAX] Ошибка отправки из очереди: {e}", flush=True)
+                        print(f"[MAX] Ошибка очереди: {e}", flush=True)
                         del max_outbox[uid]
 
     async def run_all():
