@@ -2101,7 +2101,7 @@ def start_max_bot():
 
     try:
         from maxapi import Bot as MaxBot, Dispatcher as MaxDisp
-        from maxapi.types import MessageCreated as MC, BotStarted as BS, AttachmentType
+        from maxapi.types import MessageCreated as MC, BotStarted as BS
     except Exception as e:
         print(f"[MAX] Ошибка импорта: {e}", flush=True)
         return
