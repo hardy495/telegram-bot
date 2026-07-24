@@ -647,9 +647,21 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии.")
             max_states[max_uid] = "waiting_docs"
             max_docs[max_uid] = {}
-            import asyncio as _aio
-            if _max_loop:
-                _aio.run_coroutine_threadsafe(max_send(max_uid, msg), _max_loop)
+
+            # Отправляем через MAX Bot API напрямую
+            MAX_TOK = os.getenv("MAX_TOKEN")
+            if MAX_TOK:
+                try:
+                    import httpx as _httpx
+                    with _httpx.Client(timeout=10) as _hc:
+                        resp = _hc.post(
+                            f"https://botapi.max.ru/messages?access_token={MAX_TOK}",
+                            json={"recipient": {"chat_id": max_uid}, "type": "text", "text": msg}
+                        )
+                        print(f"[MAX] Отправка гостю: {resp.status_code} {resp.text[:100]}", flush=True)
+                except Exception as e:
+                    print(f"[MAX] Ошибка отправки гостю: {e}", flush=True)
+
             del max_waiting[max_uid]
             await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → отправлено гостю в MAX!")
             return
@@ -806,11 +818,18 @@ async def maxapt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            f"💰 Итого: {total_msg} руб.\n\n{PAYMENT_INFO}\n\n"
                            f"При переводе ничего не пишите в комментарии.")
                 max_states[max_uid] = "waiting_docs"
-                import asyncio as _asyncio
-                _asyncio.run_coroutine_threadsafe(
-                    send_to_max_guest(max_uid, msg),
-                    _max_loop
-                )
+                max_docs[max_uid] = {}
+                MAX_TOK = os.getenv("MAX_TOKEN")
+                if MAX_TOK:
+                    try:
+                        import httpx as _httpx
+                        with _httpx.Client(timeout=10) as _hc:
+                            _hc.post(
+                                f"https://botapi.max.ru/messages?access_token={MAX_TOK}",
+                                json={"recipient": {"chat_id": max_uid}, "type": "text", "text": msg}
+                            )
+                    except Exception as e:
+                        print(f"[MAX] Ошибка: {e}", flush=True)
                 del max_waiting_guests[max_uid]
                 break
 
