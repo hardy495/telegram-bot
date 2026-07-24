@@ -325,8 +325,35 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
 
-    # Кнопка "Купить парк/место"
-    if query.data.startswith("parking_"):
+    # Кнопка выбора апартамента для MAX гостя
+    if query.data.startswith("maxapt_"):
+        parts = query.data.split("_")
+        max_guest_id = int(parts[1])
+        apt_index = int(parts[2])
+
+        memory = load_memory()
+        objects = memory.get("objects", {})
+        apt_names = list(objects.keys())
+
+        if apt_index >= len(apt_names):
+            await query.edit_message_text("❌ Апартамент не найден.")
+            return
+
+        apt_name = apt_names[apt_index]
+        apt_info = objects[apt_name]
+
+        import re
+        clean_info = re.sub(r'<[^>]+>', '', apt_info)
+
+        # Отправляем гостю в MAX через очередь
+        max_apt[max_guest_id] = apt_name
+        max_states[max_guest_id] = "verified"
+        max_outbox[max_guest_id] = f"✅ Ваша оплата подтверждена!\n\n{clean_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊"
+
+        await query.edit_message_text(f"✅ Информация по {apt_name} отправлена гостю в MAX!")
+        return
+
+
         guest_id = int(query.data.split("_")[1])
         username_obj = query.from_user
         guest_username = f"@{username_obj.username}" if username_obj.username else f"{username_obj.first_name}"
@@ -636,15 +663,27 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wname = winfo.get("name", "").lower()
         if set(name.lower().split()) & set(wname.split()):
             if amount == 0:
-                msg = (f"✅ Бронь найдена!\n\nВы уже полностью оплатили! 🎉\n\n"
-                       f"Заселение дистанционное — через минисейф.\n\n"
-                       f"Для оформления:\n📄 Фото паспорта\n💰 Залог: {DEPOSIT} руб.\n\n"
-                       f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии.")
+                msg = (f"✅ Бронь найдена!\n\n"
+                       f"🔑 Заселение у нас дистанционное — вы заселяетесь самостоятельно через минисейф. "
+                       f"Все инструкции, пароли и адрес придут после подтверждения оплаты.\n\n"
+                       f"Вы уже полностью оплатили бронирование! 🎉\n\n"
+                       f"Для оформления нам потребуется:\n\n"
+                       f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
+                       f"💰 Залог: {DEPOSIT} руб. (возвращается в день выезда до конца дня)\n\n"
+                       f"{PAYMENT_INFO}\n\n"
+                       f"⚠️ При переводе ничего не пишите в комментарии к платежу.")
             else:
-                msg = (f"✅ Бронь найдена!\n\nЗаселение дистанционное — через минисейф.\n\n"
-                       f"Для оформления:\n📄 Фото паспорта\n"
-                       f"💰 Остаток: {amount} руб.\n💰 Залог: {DEPOSIT} руб.\n💰 Итого: {total} руб.\n\n"
-                       f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии.")
+                msg = (f"✅ Бронь найдена!\n\n"
+                       f"🔑 Заселение у нас дистанционное — вы заселяетесь самостоятельно через минисейф. "
+                       f"Все инструкции, пароли и адрес придут после подтверждения оплаты.\n\n"
+                       f"Для оформления нам потребуется:\n\n"
+                       f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
+                       f"💰 Чек об оплате по реквизитам:\n\n"
+                       f"• Остаток по бронированию: {amount} руб.\n"
+                       f"• Залог: {DEPOSIT} руб. (возвращается в день выезда до конца дня)\n"
+                       f"• Итого: {total} руб.\n\n"
+                       f"{PAYMENT_INFO}\n\n"
+                       f"⚠️ При переводе ничего не пишите в комментарии к платежу.")
             max_states[max_uid] = "waiting_docs"
             max_docs[max_uid] = {}
             # Добавляем сообщение в очередь — MAX бот отправит сам
@@ -2052,7 +2091,8 @@ async def max_send(uid, text):
     if not max_bot_instance:
         return
     try:
-        await max_bot_instance.send_message(chat_id=uid, text=text)
+        cid = max_chat_ids.get(uid, uid)
+        await max_bot_instance.send_message(chat_id=cid, text=text)
     except Exception as e:
         print(f"[MAX] send error: {e}", flush=True)
 
@@ -2158,8 +2198,37 @@ def start_max_bot():
 
     async def finalize_max_docs(uid, un):
         max_states[uid] = "waiting_admin_confirmation"
+        cid = max_chat_ids.get(uid, uid)
         await max_send(uid, "✅ Все документы получены!\n\nДокументы переданы на проверку оплаты.\n⏱ Обычно до 10 минут.\n\nЕсли есть вопросы — я готов помочь! 😊")
-        await tg_admin(f"✅ Все документы от гостя {un} (MAX) получены!\nПодтвердите оплату и выберите апартамент.\n\nДля отправки инфо гостю используйте /maxapt {uid} <номер апартамента>")
+
+        # Отправляем администратору в Telegram кнопки апартаментов
+        admin_id = get_admin_chat_id()
+        tg_tok = os.getenv("TELEGRAM_TOKEN")
+        if admin_id and tg_tok:
+            memory = load_memory()
+            objects = memory.get("objects", {})
+            if objects:
+                # Формируем inline keyboard для Telegram
+                import httpx as _hx
+                buttons = []
+                for i, name in enumerate(objects.keys()):
+                    buttons.append([{"text": f"🏠 {name}", "callback_data": f"maxapt_{uid}_{i}"}])
+                keyboard = {"inline_keyboard": buttons}
+                try:
+                    async with _hx.AsyncClient() as c:
+                        await c.post(
+                            f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={
+                                "chat_id": admin_id,
+                                "text": f"✅ Все документы от гостя {un} (MAX) получены!\n\nВыберите апартамент для отправки информации:",
+                                "reply_markup": keyboard
+                            }
+                        )
+                except Exception as e:
+                    print(f"[MAX] Ошибка отправки кнопок: {e}", flush=True)
+                    await tg_admin(f"✅ Все документы от гостя {un} (MAX) получены!\nИспользуйте: /maxapt {uid} <номер>")
+            else:
+                await tg_admin(f"✅ Все документы от гостя {un} (MAX) получены!\n⚠️ База апартаментов пуста!")
 
     @md.bot_started()
     async def ms(event: BS):
