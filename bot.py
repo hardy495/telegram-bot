@@ -658,9 +658,9 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"https://botapi.max.ru/messages?access_token={MAX_TOK}",
                             json={"recipient": {"chat_id": max_uid}, "type": "text", "text": msg}
                         )
-                        print(f"[MAX] Отправка гостю: {resp.status_code} {resp.text[:100]}", flush=True)
+                        print(f"[MAX] Отправка: {resp.status_code} {resp.text[:200]}", flush=True)
                 except Exception as e:
-                    print(f"[MAX] Ошибка отправки гостю: {e}", flush=True)
+                    print(f"[MAX] Ошибка отправки: {e}", flush=True)
 
             del max_waiting[max_uid]
             await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → отправлено гостю в MAX!")
@@ -2184,13 +2184,14 @@ def start_max_bot():
     @md.bot_started()
     async def ms(event: BS):
         uid = event.message.sender.user_id
-        max_states[uid] = "asking_name"
+        max_states[uid] = "greeted"
         max_hist[uid] = []
         max_docs[uid] = {}
         await event.message.answer(
             "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
-            "Для того чтобы найти ваше бронирование в системе, пришлите пожалуйста "
-            "вашу фамилию и имя на которое оформлена бронь и даты заезда/выезда:\n\n"
+            "🔑 Заселение у нас дистанционное — вы заселяетесь самостоятельно через минисейф. "
+            "Все инструкции придут после подтверждения оплаты.\n\n"
+            "Для поиска вашего бронирования напишите имя на которое оформлена бронь и даты:\n\n"
             "Например: Иванов Иван с 01.01 по 02.01"
         )
 
@@ -2206,12 +2207,12 @@ def start_max_bot():
             for att in body.attachments:
                 att_type = getattr(att, 'type', None)
                 if att_type in ['image', 'photo'] or str(att_type) in ['AttachmentType.IMAGE', 'image']:
-                    if state not in ["asking_name", "waiting_balance", "waiting_docs", None]:
+                    if state in ["waiting_docs", "verified"]:
                         try:
-                            import httpx, base64
+                            import httpx as _hx, base64
                             att_url = getattr(att, 'url', None) or getattr(getattr(att, 'payload', None), 'url', None)
                             if att_url:
-                                async with httpx.AsyncClient() as hc:
+                                async with _hx.AsyncClient() as hc:
                                     img_resp = await hc.get(att_url)
                                     img_bytes = img_resp.content
 
@@ -2237,27 +2238,28 @@ def start_max_bot():
                                     else:
                                         await event.message.answer("✅ Чек принят!\n\nТеперь пришлите фото паспорта 📄")
                                 elif is_passport and has_passport:
-                                    await event.message.answer("📄 Паспорт уже получен. Пришлите чек об оплате 🧾")
+                                    await event.message.answer("📄 Паспорт уже получен. Пришлите чек 🧾")
                                 elif is_check and has_payment:
-                                    await event.message.answer("🧾 Чек уже получен. Пришлите фото паспорта 📄")
+                                    await event.message.answer("🧾 Чек уже получен. Пришлите паспорт 📄")
                                 else:
-                                    await event.message.answer("❌ Не могу определить документ.\nПришлите фото паспорта или чек об оплате.")
+                                    await event.message.answer("❌ Не могу определить документ.\nПришлите фото паспорта или чек.")
                         except Exception as e:
                             print(f"[MAX] Фото ошибка: {e}", flush=True)
-                            await event.message.answer("Спасибо за фото! Если есть вопросы — задавайте 😊")
+                    else:
+                        await event.message.answer("Спасибо за фото! Если есть вопросы — задавайте 😊")
             return
 
         text = body.text if body else ""
         if not text:
             return
 
-        if state is None:
+        # Если только поздоровались — ждём имя
+        if state in [None, "greeted"]:
             max_states[uid] = "asking_name"
             max_hist[uid] = []
             max_docs[uid] = {}
             await event.message.answer(
-                "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
-                "Напишите имя на которое оформлена бронь и даты заезда/выезда:\n\n"
+                "Напишите пожалуйста имя на которое оформлена бронь и даты заезда/выезда:\n\n"
                 "Например: Иванов Иван с 01.01 по 02.01"
             )
             return
