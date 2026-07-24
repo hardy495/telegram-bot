@@ -190,7 +190,7 @@ async def notify_admin_extension(context, user, days):
     username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user.id})"
     guest_name = f"ФИО: {context.user_data.get('guest_name', 'не указано')}" if hasattr(context, 'user_data') else ""
     msg = await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID,
+        chat_id=get_admin_chat_id(),
         text=f"🔄 *Запрос на продление*\n\n"
              f"Гость: {username}\n"
              f"{guest_name}\n"
@@ -211,7 +211,7 @@ async def notify_admin_time_request(context, user, request_type, time_str, hours
     username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user.id})"
     type_text = "ранний заезд" if request_type == "early" else "поздний выезд"
     msg = await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID,
+        chat_id=get_admin_chat_id(),
         text=f"🕐 *Запрос на {type_text}*\n\n"
              f"Гость: {username}\n"
              f"Время: {time_str}\n"
@@ -655,7 +655,8 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     import httpx as _httpx
                     with _httpx.Client(timeout=10) as _hc:
                         resp = _hc.post(
-                            f"https://botapi.max.ru/messages?access_token={MAX_TOK}",
+                            f"https://botapi.max.ru/messages",
+                            headers={"Authorization": f"Bearer {MAX_TOK}"},
                             json={"recipient": {"chat_id": max_uid}, "type": "text", "text": msg}
                         )
                         print(f"[MAX] Отправка: {resp.status_code} {resp.text[:200]}", flush=True)
@@ -716,9 +717,9 @@ async def maxapt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async def send():
                 async with httpx.AsyncClient() as c:
                     await c.post(
-                        f"https://botapi.max.ru/messages",
+                        "https://botapi.max.ru/messages",
                         headers={"Authorization": f"Bearer {MAX_TOKEN}"},
-                        json={"chat_id": guest_id, "text": f"✅ Ваша оплата подтверждена!\n\n{clean_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊"}
+                        json={"recipient": {"chat_id": guest_id}, "type": "text", "text": f"✅ Ваша оплата подтверждена!\n\n{clean_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊"}
                     )
             asyncio.create_task(send())
 
@@ -825,7 +826,8 @@ async def maxapt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         import httpx as _httpx
                         with _httpx.Client(timeout=10) as _hc:
                             _hc.post(
-                                f"https://botapi.max.ru/messages?access_token={MAX_TOK}",
+                                "https://botapi.max.ru/messages",
+                                headers={"Authorization": f"Bearer {MAX_TOK}"},
                                 json={"recipient": {"chat_id": max_uid}, "type": "text", "text": msg}
                             )
                     except Exception as e:
@@ -1091,16 +1093,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 amount_result = amount_check.content[0].text.strip()
 
                 if "НЕ СОВПАДАЕТ" in amount_result.upper():
-                    if ADMIN_CHAT_ID:
+                    if get_admin_chat_id():
                         await context.bot.send_message(
-                            chat_id=ADMIN_CHAT_ID,
+                            chat_id=get_admin_chat_id(),
                             text=f"⚠️ Чек (PDF) от гостя {username}\n\n"
                                  f"Гость: {context.user_data.get('guest_name', '?')}\n"
                                  f"Запрошенная сумма: {expected_amount} руб.\n"
                                  f"Результат: {amount_result}\n\n❌ СУММЫ НЕ СОВПАДАЮТ\n\nЧек 👇"
                         )
                         await context.bot.forward_message(
-                            chat_id=ADMIN_CHAT_ID,
+                            chat_id=get_admin_chat_id(),
                             from_chat_id=update.effective_chat.id,
                             message_id=update.message.message_id
                         )
@@ -1210,16 +1212,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             elif reason.startswith("wrong_amount"):
                 found = reason.split(":")[-1].strip()
-                if ADMIN_CHAT_ID:
+                if get_admin_chat_id():
                     await context.bot.send_message(
-                        chat_id=ADMIN_CHAT_ID,
+                        chat_id=get_admin_chat_id(),
                         text=f"⚠️ Чек (PDF) от гостя {username}\n\n"
                              f"Сумма в чеке: {found} руб.\n"
                              f"Запрошенная сумма: {expected_amount} руб.\n\n"
                              f"❌ СУММЫ НЕ СОВПАДАЮТ\n\nЧек 👇"
                     )
                     await context.bot.forward_message(
-                        chat_id=ADMIN_CHAT_ID,
+                        chat_id=get_admin_chat_id(),
                         from_chat_id=update.effective_chat.id,
                         message_id=update.message.message_id
                     )
@@ -1234,10 +1236,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
-        if ADMIN_CHAT_ID:
+        if get_admin_chat_id():
             expected_str = f"{expected_amount} руб." if expected_amount else "не определена"
             await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 text=f"🧾 Чек (PDF) от гостя {username}\n\n"
                      f"Запрошенная сумма: {expected_str}\n✅ Сумма совпадает\n\nЧек 👇"
             )
@@ -1349,9 +1351,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             elif reason.startswith("wrong_amount"):
                 found = reason.split(":")[-1].strip()
-                if ADMIN_CHAT_ID:
+                if get_admin_chat_id():
                     await context.bot.send_message(
-                        chat_id=ADMIN_CHAT_ID,
+                        chat_id=get_admin_chat_id(),
                         text=f"⚠️ Чек от гостя {username}\n\n"
                              f"Гость: {context.user_data.get('guest_name', 'не указано')}\n"
                              f"Сумма в чеке: {found} руб.\n"
@@ -1359,7 +1361,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              f"❌ СУММЫ НЕ СОВПАДАЮТ\n\nЧек 👇"
                     )
                     await context.bot.forward_message(
-                        chat_id=ADMIN_CHAT_ID,
+                        chat_id=get_admin_chat_id(),
                         from_chat_id=update.effective_chat.id,
                         message_id=update.message.message_id
                     )
@@ -1378,11 +1380,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Чек валидный
         found_amount = reason.split(":")[-1].strip() + " руб." if ":" in reason else "не определена"
-        if ADMIN_CHAT_ID:
+        if get_admin_chat_id():
             expected_str = f"{expected_amount} руб." if expected_amount else "не определена"
             amount_status = f"✅ Сумма совпадает: {expected_str}" if expected_amount else "⚠️ Проверьте вручную"
             await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 text=f"🧾 Чек от гостя {username}\n\n"
                      f"Гость: {context.user_data.get('guest_name', 'не указано')}\n"
                      f"Запрошенная сумма: {expected_str}\n\n"
@@ -1419,13 +1421,14 @@ async def _finalize_docs(update, context, user_id, username):
         "⏱ Обычно это занимает не более 10 минут.\n\n"
         "Пока ждёте — если есть вопросы, я готов помочь! 😊"
     )
-    if ADMIN_CHAT_ID:
+    admin_id = get_admin_chat_id()
+    if admin_id:
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
             InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
         ]])
         await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
+            chat_id=admin_id,
             text=f"✅ Все документы от гостя {username} получены!\nПодтвердите получение оплаты:",
             reply_markup=keyboard
         )
@@ -1838,11 +1841,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if state == "waiting_new_booking_dates":
         # Пересылаем даты администратору
-        if ADMIN_CHAT_ID:
+        if get_admin_chat_id():
             username = f"@{user.username}" if user.username else f"{user.first_name}"
             guest_name = context.user_data.get("guest_name", username)
             await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 text=f"🔄 *Запрос на продление/новую бронь*\n\n"
                      f"Гость: {username}\n"
                      f"ФИО: {guest_name}\n"
