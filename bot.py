@@ -56,7 +56,11 @@ def load_admin_chat_id():
             return data.get("admin_chat_id")
     return None
 
-def save_admin_chat_id(chat_id):
+def get_admin_chat_id():
+    """Всегда читаем актуальный ADMIN_CHAT_ID из файла"""
+    return load_admin_chat_id() or ADMIN_CHAT_ID
+
+
     """Сохранить ADMIN_CHAT_ID в файл"""
     with open(ADMIN_FILE, "w") as f:
         json.dump({"admin_chat_id": chat_id}, f)
@@ -167,11 +171,12 @@ def is_admin(user):
     return user.username and f"@{user.username}".lower() == ADMIN_USERNAME.lower()
 
 async def notify_admin_question(context, question, user):
-    if not ADMIN_CHAT_ID:
+    admin_id = load_admin_chat_id() or ADMIN_CHAT_ID
+    if not admin_id:
         return
     username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user.id})"
     msg = await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID,
+        chat_id=admin_id,
         text=f"❓ *Вопрос от гостя {username}:*\n\n{question}\n\n"
              f"_Нажмите Reply и напишите ответ — он уйдёт гостю автоматически_",
         parse_mode="Markdown"
@@ -179,7 +184,7 @@ async def notify_admin_question(context, question, user):
     notification_to_guest[msg.message_id] = user.id
 
 async def notify_admin_extension(context, user, days):
-    if not ADMIN_CHAT_ID:
+    if not get_admin_chat_id():
         return
     username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user.id})"
     guest_name = f"ФИО: {context.user_data.get('guest_name', 'не указано')}" if hasattr(context, 'user_data') else ""
@@ -200,7 +205,7 @@ async def notify_admin_extension(context, user, days):
     }
 
 async def notify_admin_time_request(context, user, request_type, time_str, hours, amount):
-    if not ADMIN_CHAT_ID:
+    if not get_admin_chat_id():
         return
     username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user.id})"
     type_text = "ранний заезд" if request_type == "early" else "поздний выезд"
@@ -325,9 +330,9 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         username_obj = query.from_user
         guest_username = f"@{username_obj.username}" if username_obj.username else f"{username_obj.first_name}"
 
-        if ADMIN_CHAT_ID:
+        if get_admin_chat_id():
             await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 text=f"🅿️ *Запрос на покупку парковочного места*\n\n"
                      f"Гость: {guest_username}\n"
                      f"Апартамент: Красная 176\n\n"
@@ -366,7 +371,7 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
                 InlineKeyboardButton("✅ Получил", callback_data=f"received_{guest_id}"),
                 InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{guest_id}")
             ]])
-            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Подтвердите получение оплаты:", reply_markup=keyboard)
+            await context.bot.send_message(chat_id=get_admin_chat_id(), text="Подтвердите получение оплаты:", reply_markup=keyboard)
             await context.bot.send_message(
                 chat_id=guest_id,
                 text="✅ Все документы получены!\n\nПередано на проверку оплаты. ⏱\nОбычно до 10 минут.\n\nЕсли есть вопросы — готов помочь! 😊"
@@ -492,9 +497,9 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         apt_name = parts[2] if len(parts) > 2 else "апартамент"
 
         # Уведомляем администратора — убираем дублирование "кв"
-        if ADMIN_CHAT_ID:
+        if get_admin_chat_id():
             await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 text=f"🚪 *{apt_name} — выехали*",
                 parse_mode="Markdown"
             )
@@ -857,14 +862,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if has_passport:
                 await update.message.reply_text("📄 Паспорт уже получен. Пришлите чек об оплате 🧾")
                 return
-            if ADMIN_CHAT_ID:
+            if get_admin_chat_id():
                 await context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
+                    chat_id=get_admin_chat_id(),
                     text=f"📄 *Паспорт (PDF) от гостя:* {username} (ID: {user_id})\n✅ ИИ подтвердил",
                     parse_mode="Markdown"
                 )
                 await context.bot.forward_message(
-                    chat_id=ADMIN_CHAT_ID,
+                    chat_id=get_admin_chat_id(),
                     from_chat_id=update.effective_chat.id,
                     message_id=update.message.message_id
                 )
@@ -930,7 +935,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
                             InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
                         ]])
-                        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Подтвердите:", reply_markup=keyboard)
+                        await context.bot.send_message(chat_id=get_admin_chat_id(), text="Подтвердите:", reply_markup=keyboard)
                     guest_states[user_id] = "waiting_admin_confirmation"
                     await update.message.reply_text(
                         "⚠️ Сумма в чеке не совпадает.\n\nЧек передан администратору на проверку. ⏱"
@@ -938,14 +943,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
             # Чек принят
-            if ADMIN_CHAT_ID:
+            if get_admin_chat_id():
                 await context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
+                    chat_id=get_admin_chat_id(),
                     text=f"🧾 Чек (PDF) от гостя {username}\n"
                          f"Запрошенная сумма: {expected_amount or '?'} руб.\n✅ Сумма совпадает\n\nЧек 👇"
                 )
                 await context.bot.forward_message(
-                    chat_id=ADMIN_CHAT_ID,
+                    chat_id=get_admin_chat_id(),
                     from_chat_id=update.effective_chat.id,
                     message_id=update.message.message_id
                 )
@@ -988,14 +993,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if has_passport:
             await update.message.reply_text("📄 Паспорт уже получен. Пришлите чек об оплате 🧾")
             return
-        if ADMIN_CHAT_ID:
+        if get_admin_chat_id():
             await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 text=f"📄 *Паспорт (PDF) от гостя:* {username} (ID: {user_id})\n✅ ИИ подтвердил",
                 parse_mode="Markdown"
             )
             await context.bot.forward_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 from_chat_id=update.effective_chat.id,
                 message_id=update.message.message_id
             )
@@ -1049,7 +1054,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
                         InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
                     ]])
-                    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Подтвердите получение оплаты:", reply_markup=keyboard)
+                    await context.bot.send_message(chat_id=get_admin_chat_id(), text="Подтвердите получение оплаты:", reply_markup=keyboard)
                 guest_states[user_id] = "waiting_admin_confirmation"
                 await update.message.reply_text(
                     "⚠️ Сумма в чеке не совпадает. Чек передан администратору. ⏱"
@@ -1064,7 +1069,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      f"Запрошенная сумма: {expected_str}\n✅ Сумма совпадает\n\nЧек 👇"
             )
             await context.bot.forward_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 from_chat_id=update.effective_chat.id,
                 message_id=update.message.message_id
             )
@@ -1124,14 +1129,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("📄 Паспорт уже получен. Пришлите чек об оплате 🧾")
             return
         # Паспорт принят
-        if ADMIN_CHAT_ID:
+        if get_admin_chat_id():
             await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 text=f"📄 *Паспорт от гостя:* {username} (ID: {user_id})\n✅ ИИ подтвердил",
                 parse_mode="Markdown"
             )
             await context.bot.forward_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 from_chat_id=update.effective_chat.id,
                 message_id=update.message.message_id
             )
@@ -1189,7 +1194,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         InlineKeyboardButton("✅ Получил", callback_data=f"received_{user_id}"),
                         InlineKeyboardButton("❌ Не получил", callback_data=f"not_received_{user_id}")
                     ]])
-                    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Подтвердите получение оплаты:", reply_markup=keyboard)
+                    await context.bot.send_message(chat_id=get_admin_chat_id(), text="Подтвердите получение оплаты:", reply_markup=keyboard)
                 guest_states[user_id] = "waiting_admin_confirmation"
                 await update.message.reply_text(
                     "⚠️ Сумма в чеке не совпадает с запрошенной.\n\n"
@@ -1211,7 +1216,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      f"{amount_status}\n\nЧек 👇"
             )
             await context.bot.forward_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 from_chat_id=update.effective_chat.id,
                 message_id=update.message.message_id
             )
@@ -1444,15 +1449,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 balance_data = None
 
-        # Уведомляем админа только если бронь не найдена — просто сообщаем без подсказок
-        if not balance_data and ADMIN_CHAT_ID:
-            await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=f"🆕 Новый гость: *{name}*\n"
-                     f"Заезд: {date_from or '?'} | Выезд: {date_to or '?'}\n"
-                     f"Бронь не найдена в базе.",
-                parse_mode="Markdown"
-            )
+        # Уведомляем админа только если бронь не найдена
+        if not balance_data:
+            admin_id = load_admin_chat_id() or ADMIN_CHAT_ID
+            if admin_id:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🆕 Новый гость: *{name}*\n"
+                         f"Заезд: {date_from or '?'} | Выезд: {date_to or '?'}\n"
+                         f"Бронь не найдена в базе.",
+                    parse_mode="Markdown"
+                )
 
         if balance_data:
             amount = balance_data["amount"]
@@ -1681,9 +1688,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
         username = f"@{user.username}" if user.username else f"{user.first_name}"
 
-        if ADMIN_CHAT_ID:
+        if get_admin_chat_id():
             await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 text=f"💳 *Реквизиты для возврата залога*\n\n"
                      f"Апартамент: *{apt_name}*\n"
                      f"Гость: {username}\n\n"
@@ -1706,9 +1713,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
         username = f"@{user.username}" if user.username else f"{user.first_name}"
 
-        if ADMIN_CHAT_ID:
+        if get_admin_chat_id():
             await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=get_admin_chat_id(),
                 text=f"⭐ *Обратная связь от гостя*\n\n"
                      f"Апартамент: *{apt_name}*\n"
                      f"Гость: {username}\n\n"
@@ -1738,9 +1745,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username = f"@{user.username}" if user.username else f"{user.first_name}"
 
         if is_requisites:
-            if ADMIN_CHAT_ID:
+            if get_admin_chat_id():
                 await context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
+                    chat_id=get_admin_chat_id(),
                     text=f"💳 *Реквизиты для возврата залога*\n\n"
                          f"Апартамент: *{apt_name}*\n"
                          f"Гость: {username}\n\n"
@@ -1755,9 +1762,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             guest_states[user_id] = "checkout_done"
         else:
-            if ADMIN_CHAT_ID:
+            if get_admin_chat_id():
                 await context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
+                    chat_id=get_admin_chat_id(),
                     text=f"⭐ *Обратная связь от гостя*\n\n"
                          f"Апартамент: *{apt_name}*\n"
                          f"Гость: {username}\n\n"
