@@ -591,7 +591,64 @@ async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def maxapt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправить информацию по апартаменту гостю в MAX: /maxapt user_id название"""
+    if not is_admin(update.effective_user):
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Использование: /maxapt USER_ID название апартамента")
+        return
+    try:
+        guest_id = int(context.args[0])
+        apt_name = " ".join(context.args[1:])
+        memory = load_memory()
+        objects = memory.get("objects", {})
+        apt_names = list(objects.keys())
+
+        # Ищем апартамент по номеру или названию
+        apt_info = None
+        matched_name = apt_name
+        for name, info in objects.items():
+            if apt_name.lower() in name.lower():
+                apt_info = info
+                matched_name = name
+                break
+
+        if not apt_info:
+            # Пробуем как индекс
+            try:
+                idx = int(apt_name) - 1
+                matched_name = apt_names[idx]
+                apt_info = objects[matched_name]
+            except:
+                await update.message.reply_text(f"Апартамент не найден. Список: {', '.join(apt_names)}")
+                return
+
+        import re
+        clean_info = re.sub(r'<[^>]+>', '', apt_info)
+
+        # Сохраняем апартамент гостя в MAX
+        max_apt[guest_id] = matched_name
+        max_states[guest_id] = "verified"
+
+        # Отправляем гостю через MAX API
+        import asyncio, httpx
+        MAX_TOKEN = os.getenv("MAX_TOKEN")
+        if MAX_TOKEN:
+            async def send():
+                async with httpx.AsyncClient() as c:
+                    await c.post(
+                        f"https://botapi.max.ru/messages",
+                        headers={"Authorization": f"Bearer {MAX_TOKEN}"},
+                        json={"chat_id": guest_id, "text": f"✅ Ваша оплата подтверждена!\n\n{clean_info}\n\nЕсли возникнут вопросы — я всегда готов помочь! 😊"}
+                    )
+            asyncio.create_task(send())
+
+        await update.message.reply_text(f"✅ Информация по {matched_name} отправлена гостю в MAX!")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
+
     if not is_admin(update.effective_user):
         return
 
@@ -1903,6 +1960,7 @@ app = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", set_admin_id))
+app.add_handler(CommandHandler("maxapt", maxapt_command))
 app.add_handler(CommandHandler("b", set_balance))
 app.add_handler(CommandHandler("remember", remember))
 app.add_handler(CommandHandler("add", add_object))
@@ -1914,190 +1972,330 @@ app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# Глобальные переменные для взаимодействия между TG и MAX ботами
+# Глобальные переменные для MAX бота
 max_states = {}
 max_hist = {}
-max_bot_instance = None
-max_waiting_guests = {}  # user_id -> {name, date_from, date_to}
+max_docs = {}        # user_id -> {has_passport, has_payment}
+max_guest_names = {} # user_id -> {name, date_from, date_to}
+max_waiting = {}     # user_id ждёт пока админ внесёт бронь
+max_apt = {}         # user_id -> название апартамента
 _max_loop = None
+max_bot_instance = None
 
-async def send_to_max_guest(user_id, text):
-    """Отправить сообщение гостю в MAX"""
+async def max_send(uid, text):
     global max_bot_instance
     if not max_bot_instance:
         return
     try:
-        await max_bot_instance.send_message(chat_id=user_id, text=text)
+        await max_bot_instance.send_message(chat_id=uid, text=text)
     except Exception as e:
-        print(f"[MAX] Ошибка отправки гостю: {e}", flush=True)
+        print(f"[MAX] send error: {e}", flush=True)
 
-print("Бот запущен!")
+async def tg_admin(text):
+    """Отправить уведомление администратору в Telegram"""
+    aid = os.getenv("ADMIN_CHAT_ID")
+    tok = os.getenv("TELEGRAM_TOKEN")
+    if not aid or not tok:
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient() as c:
+            await c.post(f"https://api.telegram.org/bot{tok}/sendMessage",
+                         json={"chat_id": aid, "text": text})
+    except Exception as e:
+        print(f"[MAX] TG notify error: {e}", flush=True)
 
-# Запускаем MAX бота в отдельном потоке
+async def tg_forward_photo(photo_url, caption):
+    """Переслать фото администратору в Telegram"""
+    aid = os.getenv("ADMIN_CHAT_ID")
+    tok = os.getenv("TELEGRAM_TOKEN")
+    if not aid or not tok:
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient() as c:
+            await c.post(f"https://api.telegram.org/bot{tok}/sendPhoto",
+                         json={"chat_id": aid, "photo": photo_url, "caption": caption})
+    except Exception as e:
+        print(f"[MAX] TG photo error: {e}", flush=True)
+
+print("Telegram бот запущен!")
+
 import threading
 
 def start_max_bot():
-    global max_bot_instance
-    try:
-        import asyncio
-        from maxapi import Bot as MaxBot, Dispatcher as MaxDisp
-        from maxapi.types import MessageCreated as MsgCreated, BotStarted as BotStart
+    global _max_loop, max_bot_instance
+    import asyncio
+    from datetime import date as date_cls
 
-        MAX_TOKEN = os.getenv("MAX_TOKEN")
-        if not MAX_TOKEN:
-            print("MAX_TOKEN не задан — MAX бот не запущен")
+    MAX_TOKEN = os.getenv("MAX_TOKEN")
+    if not MAX_TOKEN:
+        print("[MAX] MAX_TOKEN не задан — бот не запущен")
+        return
+
+    try:
+        from maxapi import Bot as MaxBot, Dispatcher as MaxDisp
+        from maxapi.types import MessageCreated as MC, BotStarted as BS, AttachmentType
+    except Exception as e:
+        print(f"[MAX] Ошибка импорта: {e}", flush=True)
+        return
+
+    mb = MaxBot(MAX_TOKEN)
+    max_bot_instance = mb
+    md = MaxDisp()
+
+    def uname(s):
+        return (getattr(s, 'name', None) or getattr(s, 'username', None) or
+                getattr(s, 'first_name', None) or str(getattr(s, 'user_id', '?')))
+
+    async def find_booking(name, dfrom):
+        bals = load_balances_from_file()
+        if not bals:
+            return None
+        today = date_cls.today().strftime("%d.%m.%Y")
+        btext = "\n".join(f"{i+1}. {d['name']} {d['date_from']}-{d['date_to']}"
+                           for i,(k,d) in enumerate(bals.items()))
+        keys = list(bals.keys())
+        r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=5,
+            messages=[{"role":"user","content":f"Сегодня {today}. Гость: имя='{name}' заезд='{dfrom}'\nБрони:\n{btext}\nНайди совпадение. Ответь только номером или 0."}])
+        try:
+            n = int(r.content[0].text.strip())
+            if 1 <= n <= len(keys):
+                return bals[keys[n-1]]
+        except:
+            pass
+        return None
+
+    async def parse_name_dates(text):
+        today = date_cls.today().strftime("%d.%m.%Y")
+        r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=150,
+            messages=[{"role":"user","content":f"Сегодня {today}. Извлеки из текста имя и даты.\nТекст: \"{text}\"\n\nИМЯ: (имя)\nЗАЕЗД: (дата ДД.ММ)\nВЫЕЗД: (дата ДД.ММ)\n\nЕсли написано сегодня={today}."}])
+        name=dfrom=dto=""
+        for ln in r.content[0].text.strip().split("\n"):
+            if ln.upper().startswith("ИМЯ:"): name=ln.split(":",1)[-1].strip()
+            elif ln.upper().startswith("ЗАЕЗД:"): dfrom=ln.split(":",1)[-1].strip()
+            elif ln.upper().startswith("ВЫЕЗД:"): dto=ln.split(":",1)[-1].strip()
+        return name, dfrom, dto
+
+    async def analyze_image_max(img_bytes, check_type):
+        import base64
+        img_b64 = base64.standard_b64encode(img_bytes).decode()
+        if check_type == "passport":
+            prompt = "Это паспорт? Ответь только ДА или НЕТ."
+        else:
+            prompt = "Это чек об оплате? Ответь только ДА или НЕТ."
+        r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=5,
+            messages=[{"role":"user","content":[
+                {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":img_b64}},
+                {"type":"text","text":prompt}
+            ]}])
+        return r.content[0].text.strip().upper().startswith("ДА")
+
+    async def finalize_max_docs(uid, un):
+        max_states[uid] = "waiting_admin_confirmation"
+        await max_send(uid, "✅ Все документы получены!\n\nДокументы переданы на проверку оплаты.\n⏱ Обычно до 10 минут.\n\nЕсли есть вопросы — я готов помочь! 😊")
+        await tg_admin(f"✅ Все документы от гостя {un} (MAX) получены!\nПодтвердите оплату и выберите апартамент.\n\nДля отправки инфо гостю используйте /maxapt {uid} <номер апартамента>")
+
+    @md.bot_started()
+    async def ms(event: BS):
+        uid = event.message.sender.user_id
+        max_states[uid] = "asking_name"
+        max_hist[uid] = []
+        max_docs[uid] = {}
+        await event.message.answer(
+            "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
+            "Для того чтобы найти ваше бронирование в системе, пришлите пожалуйста "
+            "вашу фамилию и имя на которое оформлена бронь и даты заезда/выезда:\n\n"
+            "Например: Иванов Иван с 01.01 по 02.01"
+        )
+
+    @md.message_created()
+    async def mm(event: MC):
+        uid = event.message.sender.user_id
+        un = uname(event.message.sender)
+        state = max_states.get(uid)
+        body = event.message.body
+
+        # Обработка фото/документов
+        if body and hasattr(body, 'attachments') and body.attachments:
+            for att in body.attachments:
+                att_type = getattr(att, 'type', None)
+                if att_type in ['image', 'photo'] or str(att_type) in ['AttachmentType.IMAGE', 'image']:
+                    if state not in ["asking_name", "waiting_balance", "waiting_docs", None]:
+                        try:
+                            import httpx, base64
+                            att_url = getattr(att, 'url', None) or getattr(getattr(att, 'payload', None), 'url', None)
+                            if att_url:
+                                async with httpx.AsyncClient() as hc:
+                                    img_resp = await hc.get(att_url)
+                                    img_bytes = img_resp.content
+
+                                has_passport = max_docs.get(uid, {}).get("has_passport", False)
+                                has_payment = max_docs.get(uid, {}).get("has_payment", False)
+
+                                await event.message.answer("🔍 Проверяю документ...")
+                                is_passport = await analyze_image_max(img_bytes, "passport")
+                                is_check = not is_passport and await analyze_image_max(img_bytes, "payment")
+
+                                if is_passport and not has_passport:
+                                    await tg_admin(f"📄 Паспорт от гостя {un} (MAX) ✅")
+                                    max_docs.setdefault(uid, {})["has_passport"] = True
+                                    if max_docs[uid].get("has_payment"):
+                                        await finalize_max_docs(uid, un)
+                                    else:
+                                        await event.message.answer("✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾")
+                                elif is_check and not has_payment:
+                                    await tg_admin(f"🧾 Чек от гостя {un} (MAX) ✅")
+                                    max_docs.setdefault(uid, {})["has_payment"] = True
+                                    if max_docs[uid].get("has_passport"):
+                                        await finalize_max_docs(uid, un)
+                                    else:
+                                        await event.message.answer("✅ Чек принят!\n\nТеперь пришлите фото паспорта 📄")
+                                elif is_passport and has_passport:
+                                    await event.message.answer("📄 Паспорт уже получен. Пришлите чек об оплате 🧾")
+                                elif is_check and has_payment:
+                                    await event.message.answer("🧾 Чек уже получен. Пришлите фото паспорта 📄")
+                                else:
+                                    await event.message.answer("❌ Не могу определить документ.\nПришлите фото паспорта или чек об оплате.")
+                        except Exception as e:
+                            print(f"[MAX] Фото ошибка: {e}", flush=True)
+                            await event.message.answer("Спасибо за фото! Если есть вопросы — задавайте 😊")
             return
 
-        import httpx
-        import re as re_module
+        text = body.text if body else ""
+        if not text:
+            return
 
-        async def tg_notify(text):
-            aid = os.getenv("ADMIN_CHAT_ID")
-            tok = os.getenv("TELEGRAM_TOKEN")
-            if not aid or not tok:
-                return
-            try:
-                async with httpx.AsyncClient() as c:
-                    await c.post(f"https://api.telegram.org/bot{tok}/sendMessage",
-                                 json={"chat_id": aid, "text": text})
-            except Exception as e:
-                print(f"[MAX] TG ошибка: {e}", flush=True)
-
-        max_bot = MaxBot(MAX_TOKEN)
-        max_bot_instance = max_bot
-        max_dp = MaxDisp()
-
-        def uname(s):
-            return getattr(s,'name',None) or getattr(s,'username',None) or str(getattr(s,'user_id','?'))
-
-        async def find_bal(name, dfrom):
-            bals = load_balances_from_file()
-            if not bals:
-                return None
-            btext = "\n".join(f"{i+1}. {d['name']} {d['date_from']}-{d['date_to']}"
-                              for i,(k,d) in enumerate(bals.items()))
-            keys = list(bals.keys())
-            r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=5,
-                messages=[{"role":"user","content":f"Гость: '{name}' '{dfrom}'\n{btext}\nНомер или 0:"}])
-            try:
-                n = int(r.content[0].text.strip())
-                if 1 <= n <= len(keys):
-                    return bals[keys[n-1]]
-            except:
-                pass
-            return None
-
-        def mk_knowledge():
-            mem = load_memory()
-            t = ""
-            for nm, inf in mem.get("objects",{}).items():
-                t += f"\n--- {nm} ---\n{re_module.sub(r'<[^>]+>','',inf)}\n"
-            for nt in mem.get("notes",[]):
-                t += f"{nt}\n"
-            return t or "Пусто"
-
-        SYS = SYSTEM_PROMPT  # используем тот же промпт что и в Telegram
-
-        @max_dp.bot_started()
-        async def ms(event: BotStart):
-            uid = event.message.sender.user_id
+        if state is None:
             max_states[uid] = "asking_name"
             max_hist[uid] = []
+            max_docs[uid] = {}
             await event.message.answer(
                 "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
-                "Напишите имя на которое оформлена бронь и даты:\n\n"
+                "Напишите имя на которое оформлена бронь и даты заезда/выезда:\n\n"
                 "Например: Иванов Иван с 01.01 по 02.01"
             )
+            return
 
-        @max_dp.message_created()
-        async def mm(event: MsgCreated):
-            uid = event.message.sender.user_id
-            un = uname(event.message.sender)
-            text = event.message.body.text if event.message.body else ""
-            if not text:
+        if state in ["asking_name", "waiting_balance"]:
+            name, dfrom, dto = await parse_name_dates(text)
+            if not name:
+                await event.message.answer("Напишите имя и даты:\nНапример: Иванов Иван с 01.01 по 02.01")
                 return
-            state = max_states.get(uid)
-
-            if state is None:
-                max_states[uid] = "asking_name"
-                max_hist[uid] = []
-                await event.message.answer("Здравствуйте! 👋\n\nНапишите имя на которое оформлена бронь и даты:\nНапример: Иванов Иван с 01.01 по 02.01")
+            max_guest_names[uid] = {"name": name, "date_from": dfrom, "date_to": dto}
+            bd = await find_booking(name, dfrom)
+            if not bd:
+                await tg_admin(
+                    f"🆕 Новый гость (MAX): {un}\nИмя: {name} | {dfrom}-{dto}\n"
+                    f"Бронь не найдена.\nДобавьте: /b {name} с {dfrom} по {dto} СУММА"
+                )
+                max_states[uid] = "waiting_balance"
+                max_waiting[uid] = {"name": name, "date_from": dfrom, "date_to": dto}
+                await event.message.answer(
+                    f"Бронирование на имя {name} не найдено в системе.\n\n"
+                    f"Уточняем информацию — оператор свяжется с вами в течение 10 минут. ⏱"
+                )
                 return
-
-            if state in ["asking_name", "waiting_balance"]:
-                from datetime import date
-                today = date.today().strftime("%d.%m.%Y")
-                pr = claude.messages.create(model="claude-sonnet-4-6", max_tokens=150,
-                    messages=[{"role":"user","content":f"Сегодня {today}. Извлеки из текста имя и даты бронирования.\nТекст: \"{text}\"\n\nОтветь строго в формате:\nИМЯ: (имя)\nЗАЕЗД: (дата в формате ДД.ММ или ДД.ММ.ГГГГ)\nВЫЕЗД: (дата в формате ДД.ММ или ДД.ММ.ГГГГ)\n\nЕсли написано 'сегодня' — используй {today}. Если 'завтра' — следующий день."}])
-                name=dfrom=dto=""
-                for ln in pr.content[0].text.strip().split("\n"):
-                    if ln.upper().startswith("ИМЯ:"): name=ln.split(":",1)[-1].strip()
-                    elif ln.upper().startswith("ЗАЕЗД:"): dfrom=ln.split(":",1)[-1].strip()
-                    elif ln.upper().startswith("ВЫЕЗД:"): dto=ln.split(":",1)[-1].strip()
-                if not name:
-                    await event.message.answer("Напишите имя и даты:\nНапример: Иванов Иван с 01.01 по 02.01")
-                    return
-                bd = await find_bal(name, dfrom)
-                if not bd:
-                    await tg_notify(f"🆕 Гость (MAX): {un}\nИмя: {name} | {dfrom}-{dto}\nБронь не найдена. Добавьте: /b {name} с {dfrom} по {dto} СУММА")
-                    max_states[uid] = "waiting_balance"
-                    max_waiting_guests[uid] = {"name": name, "date_from": dfrom, "date_to": dto}
-                    await event.message.answer(
-                        f"Бронирование на имя {name} не найдено в системе.\n\n"
-                        f"Уточняем информацию — оператор свяжется с вами в течение 10 минут. ⏱\n\n"
-                        f"Если хотите — можете написать имя и даты ещё раз для повторной проверки."
-                    )
-                    return
-                amt = bd["amount"]
-                total = DEPOSIT if amt==0 else amt+DEPOSIT
-                max_states[uid] = "waiting_docs"
-                await tg_notify(f"🆕 Гость (MAX): {un}\n{name} | {dfrom}\n✅ Бронь найдена")
-                if amt == 0:
-                    await event.message.answer(f"✅ Бронь найдена!\n\nВы уже всё оплатили! 🎉\n\nДля оформления:\n📄 Фото паспорта\n💰 Залог: {DEPOSIT} руб.\n\n{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии.")
-                else:
-                    await event.message.answer(f"✅ Бронь найдена!\n\nЗаселение дистанционное — через минисейф.\n\nДля оформления:\n📄 Фото паспорта\n💰 Остаток: {amt} руб.\n💰 Залог: {DEPOSIT} руб.\n💰 Итого: {total} руб.\n\n{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии.")
-                return
-
-            if state == "waiting_docs":
-                await event.message.answer("Пришлите:\n📄 Фото паспорта\n🧾 Чек об оплате")
-                return
-            if state == "waiting_admin_confirmation":
-                await event.message.answer("⏱ На проверке. Свяжемся в течение 10 минут!")
-                return
-
-            if uid not in max_hist: max_hist[uid] = []
-            max_hist[uid].append({"role":"user","content":text})
-            if len(max_hist[uid])>20: max_hist[uid]=max_hist[uid][-20:]
-            rep = claude.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
-                system=SYS.format(knowledge=mk_knowledge()), messages=max_hist[uid])
-            reply = rep.content[0].text
-            if "[НУЖЕН_ОПЕРАТОР]" in reply:
-                await tg_notify(f"❓ Вопрос (MAX) от {un}:\n\n{text}")
-                await event.message.answer("Оператор свяжется в течение 10 минут.\n\nИли: 📞 +7 918 148 00 45")
-            elif "[ПРОДЛЕНИЕ]" in reply:
-                await tg_notify(f"🔄 Продление (MAX) от {un}:\n{text}")
-                await event.message.answer("Для продления: 📞 +7 918 148 00 45")
-            elif "[РАННИЙ_ЗАЕЗД]" in reply:
-                await tg_notify(f"🕐 Ранний заезд (MAX) от {un}:\n{text}")
-                await event.message.answer("Ранний заезд: 400 руб/час. Уточняю — отвечу в течение 10 минут! ⏱")
-            elif "[ПОЗДНИЙ_ВЫЕЗД]" in reply:
-                await tg_notify(f"🕐 Поздний выезд (MAX) от {un}:\n{text}")
-                await event.message.answer("Поздний выезд: 400 руб/час. Уточняю — отвечу в течение 10 минут! ⏱")
+            amt = bd["amount"]
+            total = DEPOSIT if amt == 0 else amt + DEPOSIT
+            max_states[uid] = "waiting_docs"
+            max_docs[uid] = {}
+            await tg_admin(f"🆕 Новый гость (MAX): {un}\n{name} | {dfrom}\n✅ Бронь найдена")
+            if amt == 0:
+                await event.message.answer(
+                    f"✅ Бронь найдена!\n\nВы уже полностью оплатили! 🎉\n\n"
+                    f"Заселение дистанционное — через минисейф.\n\n"
+                    f"Для оформления:\n📄 Фото паспорта (лицевая сторона)\n"
+                    f"💰 Залог: {DEPOSIT} руб. (возвращается в день выезда)\n\n"
+                    f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии."
+                )
             else:
-                max_hist[uid].append({"role":"assistant","content":reply})
-                await event.message.answer(reply)
+                await event.message.answer(
+                    f"✅ Бронь найдена!\n\nЗаселение дистанционное — через минисейф.\n\n"
+                    f"Для оформления:\n📄 Фото паспорта (лицевая сторона)\n\n"
+                    f"💰 Оплата по реквизитам:\n"
+                    f"• Остаток: {amt} руб.\n• Залог: {DEPOSIT} руб.\n• Итого: {total} руб.\n\n"
+                    f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии."
+                )
+            return
 
-        print("MAX бот запущен!", flush=True)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        global _max_loop
-        _max_loop = loop
-        loop.run_until_complete(max_dp.start_polling(max_bot))
+        if state == "waiting_docs":
+            await event.message.answer("Пришлите:\n📄 Фото паспорта\n🧾 Чек об оплате\n\nМожно в любом порядке!")
+            return
+
+        if state == "waiting_admin_confirmation":
+            await event.message.answer("⏱ Документы на проверке.\nОбычно до 10 минут. Если есть вопросы — задавайте!")
+            return
+
+        if state == "waiting_requisites":
+            await tg_admin(f"💳 Реквизиты (MAX)\nАпартамент: {max_apt.get(uid, '?')}\nГость: {un}\n\n{text}")
+            await event.message.answer("Благодарим за реквизиты! ✅\n\nЗалог вернём сегодня до 00:00.\n\nОставьте пожалуйста обратную связь! 😊")
+            max_states[uid] = "waiting_feedback"
+            return
+
+        if state == "waiting_feedback":
+            await tg_admin(f"⭐ Отзыв (MAX)\nАпартамент: {max_apt.get(uid, '?')}\nГость: {un}\n\n{text}")
+            await event.message.answer("Спасибо за отзыв! 🙏\n\nБудем рады видеть вас снова! 🏠")
+            max_states[uid] = "checkout_done"
+            return
+
+        if state == "checkout_done":
+            await event.message.answer("Рады слышать вас! 😊\n\nДля новой брони:\n📞 +7 918 148 00 45")
+            return
+
+        # Claude отвечает
+        if uid not in max_hist: max_hist[uid] = []
+        max_hist[uid].append({"role":"user","content":text})
+        if len(max_hist[uid]) > 20: max_hist[uid] = max_hist[uid][-20:]
+
+        apt_ctx = ""
+        apt_name = max_apt.get(uid)
+        if apt_name:
+            mem = load_memory()
+            apt_info = mem.get("objects", {}).get(apt_name, "")
+            if apt_info:
+                import re as re_m
+                apt_ctx = f"\n\n=== АПАРТАМЕНТ ГОСТЯ: {apt_name} ===\n{re_m.sub(r'<[^>]+>', '', apt_info)}"
+
+        rep = claude.messages.create(model="claude-sonnet-4-6", max_tokens=1000,
+            system=SYSTEM_PROMPT.format(knowledge=get_all_knowledge() + apt_ctx),
+            messages=max_hist[uid])
+        reply = rep.content[0].text
+
+        if "[НУЖЕН_ОПЕРАТОР]" in reply:
+            await tg_admin(f"❓ Вопрос (MAX) от {un}:\n\n{text}")
+            await event.message.answer("Спасибо за вопрос! 🙏\n\nОператор свяжется в течение 10 минут.\n\nИли: 📞 +7 918 148 00 45")
+        elif "[ПРОДЛЕНИЕ]" in reply:
+            await tg_admin(f"🔄 Продление (MAX) от {un}:\n{text}")
+            await event.message.answer("Для продления:\n\n1️⃣ Напишите даты — мы уточним\n2️⃣ Или: 📞 +7 918 148 00 45")
+        elif "[РАННИЙ_ЗАЕЗД]" in reply:
+            await tg_admin(f"🕐 Ранний заезд (MAX) от {un}:\n{text}")
+            await event.message.answer("Ранний заезд: 400 руб/час до 14:00.\n\nСо скольки хотите заехать?")
+        elif "[ПОЗДНИЙ_ВЫЕЗД]" in reply:
+            await tg_admin(f"🕐 Поздний выезд (MAX) от {un}:\n{text}")
+            await event.message.answer("Поздний выезд: 400 руб/час после 12:00.\n\nДо скольки хотите выехать?")
+        elif "[ПАРКОВКА_КРАСНАЯ]" in reply:
+            await event.message.answer(
+                "🚗 Парковка для Красная 176:\n\n"
+                "• Индивидуальное место -1 этаж — 1000 руб/сутки\n"
+                "• Бесплатно — ул. Путевая\n"
+                "• Платная с ул. Красная 176 — 60 руб/час 8-20 будни\n\n"
+                "Для покупки места: 📞 +7 918 148 00 45"
+            )
+        else:
+            max_hist[uid].append({"role":"assistant","content":reply})
+            await event.message.answer(reply)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    _max_loop = loop
+    print("[MAX] MAX бот запущен!", flush=True)
+    try:
+        loop.run_until_complete(md.start_polling(mb))
     except Exception as e:
-        print(f"[MAX] Ошибка: {e}", flush=True)
+        print(f"[MAX] Ошибка polling: {e}", flush=True)
 
 max_thread = threading.Thread(target=start_max_bot, daemon=True)
 max_thread.start()
 
 app.run_polling()
-
