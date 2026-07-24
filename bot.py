@@ -1883,4 +1883,199 @@ app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 print("Бот запущен!")
-app.run_polling()
+
+async def run_max_bot():
+    """Запускаем MAX бота в том же процессе"""
+    try:
+        from maxapi import Bot as MaxBot, Dispatcher as MaxDispatcher
+        from maxapi.types import MessageCreated as MaxMessageCreated, BotStarted as MaxBotStarted
+
+        MAX_TOKEN = os.getenv("MAX_TOKEN")
+        if not MAX_TOKEN:
+            print("MAX_TOKEN не задан — MAX бот не запущен")
+            return
+
+        max_bot_instance = MaxBot(MAX_TOKEN)
+        max_dp = MaxDispatcher()
+
+        def get_max_username(sender):
+            return (
+                getattr(sender, 'name', None) or
+                getattr(sender, 'username', None) or
+                getattr(sender, 'first_name', None) or
+                f"MAX_{getattr(sender, 'user_id', 'гость')}"
+            )
+
+        async def send_tg_admin(text):
+            admin_id = get_admin_chat_id()
+            if not admin_id:
+                return
+            try:
+                await app.bot.send_message(chat_id=admin_id, text=text)
+            except Exception as e:
+                print(f"Ошибка отправки в TG: {e}")
+
+        async def find_booking_max(name, date_from):
+            balances = load_balances_from_file()
+            if not balances:
+                return None
+            bookings_text = ""
+            booking_keys = []
+            for i, (key, data) in enumerate(balances.items()):
+                bookings_text += f"{i+1}. Имя: {data['name']}, заезд: {data['date_from']}, выезд: {data['date_to']}\n"
+                booking_keys.append(key)
+            match_response = claude.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=10,
+                messages=[{"role": "user", "content": f"Гость: имя='{name}', заезд='{date_from}'\nБрони:\n{bookings_text}\nНайди совпадение. Ответь только номером или 0."}]
+            )
+            try:
+                match_num = int(match_response.content[0].text.strip())
+                if 1 <= match_num <= len(booking_keys):
+                    return balances[booking_keys[match_num - 1]]
+            except:
+                pass
+            return None
+
+        max_guest_states = {}
+        max_conversation = {}
+
+        @max_dp.bot_started()
+        async def max_on_start(event: MaxBotStarted):
+            uid = event.message.sender.user_id
+            max_guest_states[uid] = "asking_name"
+            max_conversation[uid] = []
+            await event.message.answer(
+                "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
+                "Для поиска вашего бронирования напишите имя на которое оформлена бронь и даты:\n\n"
+                "Например: Иванов Иван с 01.01 по 02.01"
+            )
+
+        @max_dp.message_created()
+        async def max_on_message(event: MaxMessageCreated):
+            uid = event.message.sender.user_id
+            username = get_max_username(event.message.sender)
+            text = event.message.body.text if event.message.body else ""
+            if not text:
+                return
+
+            state = max_guest_states.get(uid)
+
+            if state is None:
+                max_guest_states[uid] = "asking_name"
+                max_conversation[uid] = []
+                await event.message.answer(
+                    "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
+                    "Напишите имя на которое оформлена бронь и даты:\n\n"
+                    "Например: Иванов Иван с 01.01 по 02.01"
+                )
+                return
+
+            if state in ["asking_name", "waiting_balance"]:
+                parse_resp = claude.messages.create(
+                    model="claude-sonnet-4-6", max_tokens=150,
+                    messages=[{"role": "user", "content": f"Из текста извлеки имя и даты.\nТекст: \"{text}\"\nИМЯ: (имя)\nЗАЕЗД: (дата или пусто)\nВЫЕЗД: (дата или пусто)"}]
+                )
+                name, date_from, date_to = "", "", ""
+                for line in parse_resp.content[0].text.strip().split("\n"):
+                    if line.upper().startswith("ИМЯ:"):
+                        name = line.split(":", 1)[-1].strip()
+                    elif line.upper().startswith("ЗАЕЗД:"):
+                        date_from = line.split(":", 1)[-1].strip()
+                    elif line.upper().startswith("ВЫЕЗД:"):
+                        date_to = line.split(":", 1)[-1].strip()
+
+                if not name:
+                    await event.message.answer("Напишите имя и даты:\nНапример: Иванов Иван с 01.01 по 02.01")
+                    return
+
+                balance_data = await find_booking_max(name, date_from)
+
+                if not balance_data:
+                    await send_tg_admin(
+                        f"🆕 Новый гость (MAX): {username}\nИмя: {name} | Заезд: {date_from}\n"
+                        f"Бронь не найдена. Добавьте: /b {name} с {date_from} по {date_to} СУММА"
+                    )
+                    max_guest_states[uid] = "waiting_balance"
+                    await event.message.answer(
+                        f"Бронирование на имя {name} не найдено.\n\n"
+                        f"Проверьте правильность имени и дат и напишите снова.\n\n"
+                        f"Например: Иванов Иван с 01.01 по 02.01"
+                    )
+                    return
+
+                amount = balance_data["amount"]
+                total = DEPOSIT if amount == 0 else amount + DEPOSIT
+                max_guest_states[uid] = "waiting_docs"
+                await send_tg_admin(f"🆕 Новый гость (MAX): {username}\nИмя: {name} | Заезд: {date_from}\n✅ Бронь найдена")
+
+                if amount == 0:
+                    await event.message.answer(
+                        f"✅ Бронь найдена!\n\nВы уже полностью оплатили бронирование! 🎉\n\n"
+                        f"Заселение дистанционное — через минисейф.\n\n"
+                        f"Для оформления:\n📄 Фото паспорта\n💰 Залог: {DEPOSIT} руб.\n\n"
+                        f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии."
+                    )
+                else:
+                    await event.message.answer(
+                        f"✅ Бронь найдена!\n\nЗаселение дистанционное — через минисейф.\n\n"
+                        f"Для оформления:\n📄 Фото паспорта\n"
+                        f"💰 Оплата:\n• Остаток: {amount} руб.\n• Залог: {DEPOSIT} руб.\n• Итого: {total} руб.\n\n"
+                        f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии."
+                    )
+                return
+
+            if state == "waiting_docs":
+                await event.message.answer("Пришлите:\n📄 Фото паспорта\n🧾 Чек об оплате")
+                return
+
+            if state == "waiting_admin_confirmation":
+                await event.message.answer("⏱ Документы на проверке. Свяжемся в течение 10 минут!")
+                return
+
+            # Claude отвечает
+            if uid not in max_conversation:
+                max_conversation[uid] = []
+            max_conversation[uid].append({"role": "user", "content": text})
+            if len(max_conversation[uid]) > 20:
+                max_conversation[uid] = max_conversation[uid][-20:]
+
+            response = claude.messages.create(
+                model="claude-sonnet-4-6", max_tokens=1000,
+                system=SYSTEM_PROMPT.format(knowledge=get_all_knowledge()),
+                messages=max_conversation[uid]
+            )
+            reply = response.content[0].text
+
+            if "[НУЖЕН_ОПЕРАТОР]" in reply:
+                await send_tg_admin(f"❓ Вопрос от гостя {username} (MAX):\n\n{text}")
+                await event.message.answer("Оператор свяжется в течение 10 минут.\n\nИли позвоните: 📞 +7 918 148 00 45")
+            elif "[ПРОДЛЕНИЕ]" in reply:
+                await send_tg_admin(f"🔄 Запрос на продление (MAX)\nГость: {username}\n{text}")
+                await event.message.answer("Для продления позвоните: 📞 +7 918 148 00 45")
+            elif "[РАННИЙ_ЗАЕЗД]" in reply:
+                await send_tg_admin(f"🕐 Ранний заезд (MAX)\nГость: {username}\n{text}")
+                await event.message.answer("Ранний заезд: 400 руб/час. Уточняю возможность — отвечу в течение 10 минут! ⏱")
+            elif "[ПОЗДНИЙ_ВЫЕЗД]" in reply:
+                await send_tg_admin(f"🕐 Поздний выезд (MAX)\nГость: {username}\n{text}")
+                await event.message.answer("Поздний выезд: 400 руб/час. Уточняю возможность — отвечу в течение 10 минут! ⏱")
+            else:
+                max_conversation[uid].append({"role": "assistant", "content": reply})
+                await event.message.answer(reply)
+
+        print("MAX бот запущен!")
+        await max_dp.start_polling(max_bot_instance)
+
+    except Exception as e:
+        print(f"MAX бот ошибка: {e}")
+
+async def main():
+    import asyncio
+    tg_task = asyncio.create_task(app.run_polling(close_loop=False))
+    max_task = asyncio.create_task(run_max_bot())
+    await asyncio.gather(tg_task, max_task)
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+
