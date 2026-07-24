@@ -647,24 +647,10 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии.")
             max_states[max_uid] = "waiting_docs"
             max_docs[max_uid] = {}
-
-            # Отправляем через MAX Bot API напрямую
-            MAX_TOK = os.getenv("MAX_TOKEN")
-            if MAX_TOK:
-                try:
-                    import httpx as _httpx
-                    with _httpx.Client(timeout=10) as _hc:
-                        resp = _hc.post(
-                            f"https://botapi.max.ru/messages",
-                            headers={"Authorization": f"Bearer {MAX_TOK}"},
-                            json={"recipient": {"chat_id": max_uid}, "type": "text", "text": msg}
-                        )
-                        print(f"[MAX] Отправка: {resp.status_code} {resp.text[:200]}", flush=True)
-                except Exception as e:
-                    print(f"[MAX] Ошибка отправки: {e}", flush=True)
-
+            # Добавляем сообщение в очередь — MAX бот отправит сам
+            max_outbox[max_uid] = msg
             del max_waiting[max_uid]
-            await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → отправлено гостю в MAX!")
+            await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → гость уведомлён в MAX!")
             return
 
     await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → сохранено")
@@ -820,18 +806,7 @@ async def maxapt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            f"При переводе ничего не пишите в комментарии.")
                 max_states[max_uid] = "waiting_docs"
                 max_docs[max_uid] = {}
-                MAX_TOK = os.getenv("MAX_TOKEN")
-                if MAX_TOK:
-                    try:
-                        import httpx as _httpx
-                        with _httpx.Client(timeout=10) as _hc:
-                            _hc.post(
-                                "https://botapi.max.ru/messages",
-                                headers={"Authorization": f"Bearer {MAX_TOK}"},
-                                json={"recipient": {"chat_id": max_uid}, "type": "text", "text": msg}
-                            )
-                    except Exception as e:
-                        print(f"[MAX] Ошибка: {e}", flush=True)
+                max_outbox[max_uid] = msg
                 del max_waiting_guests[max_uid]
                 break
 
@@ -2067,6 +2042,7 @@ max_docs = {}        # user_id -> {has_passport, has_payment}
 max_guest_names = {} # user_id -> {name, date_from, date_to}
 max_waiting = {}     # user_id ждёт пока админ внесёт бронь
 max_apt = {}         # user_id -> название апартамента
+max_outbox = {}      # user_id -> сообщение которое нужно отправить
 _max_loop = None
 max_bot_instance = None
 
@@ -2276,6 +2252,12 @@ def start_max_bot():
         if not text:
             return
 
+        # Проверяем очередь исходящих сообщений от Telegram администратора
+        if uid in max_outbox:
+            pending_msg = max_outbox.pop(uid)
+            await event.message.answer(pending_msg)
+            return
+
         # Если только поздоровались — ждём имя
         if state in [None, "greeted"]:
             max_states[uid] = "asking_name"
@@ -2400,8 +2382,29 @@ def start_max_bot():
     asyncio.set_event_loop(loop)
     _max_loop = loop
     print("[MAX] MAX бот запущен!", flush=True)
+
+    async def check_outbox():
+        """Периодически проверяем очередь сообщений и отправляем"""
+        while True:
+            await asyncio.sleep(2)
+            if max_outbox:
+                for uid, msg in list(max_outbox.items()):
+                    try:
+                        await mb.send_message(chat_id=uid, text=msg)
+                        del max_outbox[uid]
+                        print(f"[MAX] Сообщение из очереди отправлено гостю {uid}", flush=True)
+                    except Exception as e:
+                        print(f"[MAX] Ошибка отправки из очереди: {e}", flush=True)
+                        del max_outbox[uid]
+
+    async def run_all():
+        await asyncio.gather(
+            md.start_polling(mb),
+            check_outbox()
+        )
+
     try:
-        loop.run_until_complete(md.start_polling(mb))
+        loop.run_until_complete(run_all())
     except Exception as e:
         print(f"[MAX] Ошибка polling: {e}", flush=True)
 
