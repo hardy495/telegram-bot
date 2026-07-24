@@ -2165,7 +2165,7 @@ def start_max_bot():
             elif ln.upper().startswith("ВЫЕЗД:"): dto=ln.split(":",1)[-1].strip()
         return name, dfrom, dto
 
-    async def analyze_image_max(img_bytes, check_type):
+    async def analyze_image_max(img_bytes, check_type, media_type="image/jpeg"):
         import base64
         img_b64 = base64.standard_b64encode(img_bytes).decode()
         if check_type == "passport":
@@ -2174,7 +2174,7 @@ def start_max_bot():
             prompt = "Это чек об оплате? Ответь только ДА или НЕТ."
         r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=5,
             messages=[{"role":"user","content":[
-                {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":img_b64}},
+                {"type":"image","source":{"type":"base64","media_type": media_type,"data":img_b64}},
                 {"type":"text","text":prompt}
             ]}])
         return r.content[0].text.strip().upper().startswith("ДА")
@@ -2209,47 +2209,67 @@ def start_max_bot():
         if body and hasattr(body, 'attachments') and body.attachments:
             for att in body.attachments:
                 att_type = getattr(att, 'type', None)
-                if att_type in ['image', 'photo'] or str(att_type) in ['AttachmentType.IMAGE', 'image']:
-                    if state in ["waiting_docs", "verified"]:
-                        try:
-                            import httpx as _hx, base64
-                            att_url = getattr(att, 'url', None) or getattr(getattr(att, 'payload', None), 'url', None)
-                            if att_url:
-                                async with _hx.AsyncClient() as hc:
-                                    img_resp = await hc.get(att_url)
-                                    img_bytes = img_resp.content
+                att_url = getattr(att, 'url', None) or getattr(getattr(att, 'payload', None), 'url', None)
 
-                                has_passport = max_docs.get(uid, {}).get("has_passport", False)
-                                has_payment = max_docs.get(uid, {}).get("has_payment", False)
+                if att_url and state in ["waiting_docs", "verified", "asking_name", "waiting_balance"]:
+                    if state in ["asking_name", "waiting_balance"]:
+                        await event.message.answer("Спасибо! Сначала напишите имя и даты бронирования:\nНапример: Иванов Иван с 01.01 по 02.01")
+                        return
 
-                                await event.message.answer("🔍 Проверяю документ...")
-                                is_passport = await analyze_image_max(img_bytes, "passport")
-                                is_check = not is_passport and await analyze_image_max(img_bytes, "payment")
+                    try:
+                        import httpx as _hx, base64, imghdr
+                        async with _hx.AsyncClient() as hc:
+                            img_resp = await hc.get(att_url)
+                            img_bytes = img_resp.content
 
-                                if is_passport and not has_passport:
-                                    await tg_admin(f"📄 Паспорт от гостя {un} (MAX) ✅")
-                                    max_docs.setdefault(uid, {})["has_passport"] = True
-                                    if max_docs[uid].get("has_payment"):
-                                        await finalize_max_docs(uid, un)
-                                    else:
-                                        await event.message.answer("✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾")
-                                elif is_check and not has_payment:
-                                    await tg_admin(f"🧾 Чек от гостя {un} (MAX) ✅")
-                                    max_docs.setdefault(uid, {})["has_payment"] = True
-                                    if max_docs[uid].get("has_passport"):
-                                        await finalize_max_docs(uid, un)
-                                    else:
-                                        await event.message.answer("✅ Чек принят!\n\nТеперь пришлите фото паспорта 📄")
-                                elif is_passport and has_passport:
-                                    await event.message.answer("📄 Паспорт уже получен. Пришлите чек 🧾")
-                                elif is_check and has_payment:
-                                    await event.message.answer("🧾 Чек уже получен. Пришлите паспорт 📄")
-                                else:
-                                    await event.message.answer("❌ Не могу определить документ.\nПришлите фото паспорта или чек.")
-                        except Exception as e:
-                            print(f"[MAX] Фото ошибка: {e}", flush=True)
-                    else:
-                        await event.message.answer("Спасибо за фото! Если есть вопросы — задавайте 😊")
+                        # Определяем формат автоматически
+                        fmt = imghdr.what(None, h=img_bytes)
+                        if fmt == "jpeg" or fmt == "jpg":
+                            media_type = "image/jpeg"
+                        elif fmt == "png":
+                            media_type = "image/png"
+                        elif fmt == "webp":
+                            media_type = "image/webp"
+                        elif fmt == "gif":
+                            media_type = "image/gif"
+                        else:
+                            media_type = "image/jpeg"  # fallback
+
+                        has_passport = max_docs.get(uid, {}).get("has_passport", False)
+                        has_payment = max_docs.get(uid, {}).get("has_payment", False)
+
+                        await event.message.answer("🔍 Проверяю документ...")
+                        is_passport = await analyze_image_max(img_bytes, "passport", media_type)
+                        is_check = not is_passport and await analyze_image_max(img_bytes, "payment", media_type)
+
+                        if is_passport and not has_passport:
+                            # Пересылаем паспорт администратору в Telegram
+                            await tg_admin(f"📄 Паспорт от гостя {un} (MAX) ✅\nФото: {att_url}")
+                            max_docs.setdefault(uid, {})["has_passport"] = True
+                            if max_docs[uid].get("has_payment"):
+                                await finalize_max_docs(uid, un)
+                            else:
+                                await event.message.answer("✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾")
+                        elif is_check and not has_payment:
+                            # Пересылаем чек администратору в Telegram
+                            await tg_admin(f"🧾 Чек от гостя {un} (MAX) ✅\nФото: {att_url}")
+                            max_docs.setdefault(uid, {})["has_payment"] = True
+                            if max_docs[uid].get("has_passport"):
+                                await finalize_max_docs(uid, un)
+                            else:
+                                await event.message.answer("✅ Чек принят!\n\nТеперь пришлите фото паспорта 📄")
+                        elif is_passport and has_passport:
+                            await event.message.answer("📄 Паспорт уже получен. Пришлите чек 🧾")
+                        elif is_check and has_payment:
+                            await event.message.answer("🧾 Чек уже получен. Пришлите паспорт 📄")
+                        else:
+                            await event.message.answer("❌ Не могу определить документ.\nПришлите фото паспорта или чек об оплате.")
+                    except Exception as e:
+                        print(f"[MAX] Фото ошибка: {e}", flush=True)
+                        await tg_admin(f"📎 Файл от гостя {un} (MAX): {att_url}")
+                        await event.message.answer("Документ получен! Передан администратору на проверку. ⏱")
+                elif att_url:
+                    await event.message.answer("Спасибо за файл! Если есть вопросы — задавайте 😊")
             return
 
         text = body.text if body else ""
