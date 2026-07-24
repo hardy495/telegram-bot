@@ -14,6 +14,20 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 MEMORY_FILE = "memory.json"
 ADMIN_FILE = "admin.json"
+BALANCES_FILE = "balances.json"
+
+def load_balances_from_file():
+    if os.path.exists(BALANCES_FILE):
+        with open(BALANCES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_balances_to_file(balances):
+    with open(BALANCES_FILE, "w", encoding="utf-8") as f:
+        json.dump(balances, f, ensure_ascii=False, indent=2)
+
+# Загружаем балансы из файла при старте
+guest_balances = load_balances_from_file()
 guest_states = {}
 conversation_history = {}
 pending_guest = {}
@@ -27,10 +41,6 @@ guest_name_to_id = {}
 
 # Единое хранилище документов гостей: user_id -> {has_passport, has_payment}
 guest_docs = {}
-
-# Храним брони: ключ -> {name, date_from, date_to, amount}
-# Ключ: "имя_дата_заезда" для уникальности
-guest_balances = {}
 
 DEPOSIT = 2000
 
@@ -643,6 +653,7 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "date_to": date_to,
             "amount": amount
         }
+        save_balances_to_file(guest_balances)
 
         # Ищем гостя в активных сессиях
         guest_id = None
