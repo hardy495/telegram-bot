@@ -750,6 +750,48 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            "date_from": date_from, "date_to": date_to, "amount": amount}
     save_balances_to_file(guest_balances)
 
+    notified = False
+
+    # Ищем гостя в TELEGRAM который ждёт бронь
+    for saved_name, uid in list(guest_name_to_id.items()):
+        saved_words = set(saved_name.lower().split())
+        new_words = set(name.lower().split())
+        if saved_words & new_words and guest_states.get(uid) == "waiting_balance":
+            total_msg = DEPOSIT if amount == 0 else amount + DEPOSIT
+            if amount == 0:
+                tg_msg = (
+                    f"✅ Бронь найдена!\n\n"
+                    f"🔑 *Заселение у нас дистанционное* — вы заселяетесь самостоятельно через минисейф. "
+                    f"Все инструкции придут после подтверждения оплаты.\n\n"
+                    f"Вы уже полностью оплатили! 🎉\n\n"
+                    f"📄 Фото паспорта (лицевая сторона)\n\n"
+                    f"💰 Залог: *{DEPOSIT} руб.* _(возвращается в день выезда)_\n\n"
+                    f"{PAYMENT_INFO}\n\n"
+                    f"⚠️ При переводе *ничего не пишите* в комментарии."
+                )
+            else:
+                tg_msg = (
+                    f"✅ Бронь найдена!\n\n"
+                    f"🔑 *Заселение у нас дистанционное* — вы заселяетесь самостоятельно через минисейф. "
+                    f"Все инструкции придут после подтверждения оплаты.\n\n"
+                    f"📄 Фото паспорта (лицевая сторона)\n\n"
+                    f"💰 Оплата по реквизитам:\n"
+                    f"• Остаток: *{amount} руб.*\n"
+                    f"• Залог: *{DEPOSIT} руб.* _(возвращается в день выезда)_\n"
+                    f"• *Итого: {total_msg} руб.*\n\n"
+                    f"{PAYMENT_INFO}\n\n"
+                    f"⚠️ При переводе *ничего не пишите* в комментарии."
+                )
+            guest_states[uid] = "waiting_docs"
+            guest_docs[uid] = {}
+            try:
+                await context.bot.send_message(chat_id=uid, text=tg_msg, parse_mode="Markdown")
+                notified = True
+                await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total_msg} руб. → отправлено гостю в Telegram!")
+                return
+            except Exception as e:
+                print(f"Ошибка отправки TG гостю: {e}")
+
     # Ищем гостя в MAX который ждёт эту бронь
     for max_uid, winfo in list(max_waiting.items()):
         wname = winfo.get("name", "").lower()
@@ -757,28 +799,25 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if amount == 0:
                 msg = (f"✅ Бронь найдена!\n\n"
                        f"🔑 Заселение у нас дистанционное — вы заселяетесь самостоятельно через минисейф. "
-                       f"Все инструкции, пароли и адрес придут после подтверждения оплаты.\n\n"
+                       f"Все инструкции придут после подтверждения оплаты.\n\n"
                        f"Вы уже полностью оплатили бронирование! 🎉\n\n"
-                       f"Для оформления нам потребуется:\n\n"
-                       f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
-                       f"💰 Залог: {DEPOSIT} руб. (возвращается в день выезда до конца дня)\n\n"
+                       f"📄 Фото паспорта (лицевая сторона)\n\n"
+                       f"💰 Залог: {DEPOSIT} руб. (возвращается в день выезда)\n\n"
                        f"{PAYMENT_INFO}\n\n"
-                       f"⚠️ При переводе ничего не пишите в комментарии к платежу.")
+                       f"⚠️ При переводе ничего не пишите в комментарии.")
             else:
                 msg = (f"✅ Бронь найдена!\n\n"
                        f"🔑 Заселение у нас дистанционное — вы заселяетесь самостоятельно через минисейф. "
-                       f"Все инструкции, пароли и адрес придут после подтверждения оплаты.\n\n"
-                       f"Для оформления нам потребуется:\n\n"
-                       f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
-                       f"💰 Чек об оплате по реквизитам:\n\n"
-                       f"• Остаток по бронированию: {amount} руб.\n"
-                       f"• Залог: {DEPOSIT} руб. (возвращается в день выезда до конца дня)\n"
+                       f"Все инструкции придут после подтверждения оплаты.\n\n"
+                       f"📄 Фото паспорта (лицевая сторона)\n\n"
+                       f"💰 Оплата:\n"
+                       f"• Остаток: {amount} руб.\n"
+                       f"• Залог: {DEPOSIT} руб. (возвращается в день выезда)\n"
                        f"• Итого: {total} руб.\n\n"
                        f"{PAYMENT_INFO}\n\n"
-                       f"⚠️ При переводе ничего не пишите в комментарии к платежу.")
+                       f"⚠️ При переводе ничего не пишите в комментарии.")
             max_states[max_uid] = "waiting_docs"
             max_docs[max_uid] = {}
-            # Добавляем сообщение в очередь — MAX бот отправит сам
             max_outbox[max_uid] = msg
             del max_waiting[max_uid]
             await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → гость уведомлён в MAX!")
@@ -2615,7 +2654,7 @@ def start_max_bot():
             return
 
         # Обработка текстовых команд выезда и продления через ИИ
-        if state == "verified" and text:
+        if state in ["verified", "waiting_admin_confirmation", "waiting_docs"] and text:
             # ИИ определяет намерение
             intent_resp = claude.messages.create(
                 model="claude-sonnet-4-6", max_tokens=10,
