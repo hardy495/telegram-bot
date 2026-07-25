@@ -2372,15 +2372,22 @@ def start_max_bot():
 
                         await event.message.answer("🔍 Проверяю документ...")
 
-                        # Получаем ожидаемую сумму
+                        # Получаем ожидаемую сумму из нескольких источников
                         guest_info = max_guest_names.get(uid, {})
                         guest_name_lower = guest_info.get("name", "").lower()
                         expected_amount = None
                         bals = load_balances_from_file()
-                        for k, d in bals.items():
-                            if d["name_lower"] in guest_name_lower or guest_name_lower in d["name_lower"]:
-                                expected_amount = DEPOSIT if d["amount"] == 0 else d["amount"] + DEPOSIT
-                                break
+                        # Ищем по имени гостя
+                        if guest_name_lower:
+                            for k, d in bals.items():
+                                if d["name_lower"] in guest_name_lower or guest_name_lower in d["name_lower"]:
+                                    expected_amount = DEPOSIT if d["amount"] == 0 else d["amount"] + DEPOSIT
+                                    break
+                        # Если не нашли по имени — берём последнюю добавленную бронь
+                        if not expected_amount and bals:
+                            last = list(bals.values())[-1]
+                            expected_amount = DEPOSIT if last["amount"] == 0 else last["amount"] + DEPOSIT
+                        print(f"[MAX] expected_amount={expected_amount}", flush=True)
 
                         if media_type == "application/pdf":
                             pdf_data = base64.standard_b64encode(img_bytes).decode()
@@ -2411,7 +2418,9 @@ def start_max_bot():
                         if is_passport and not has_passport:
                             await tg_admin(f"📄 Паспорт от гостя {un} (MAX) ✅\n{att_url}")
                             max_docs.setdefault(uid, {})["has_passport"] = True
+                            print(f"[MAX] Паспорт принят, has_payment={max_docs[uid].get('has_payment')}", flush=True)
                             if max_docs[uid].get("has_payment"):
+                                print(f"[MAX] Вызываем finalize_max_docs", flush=True)
                                 await finalize_max_docs(uid, un)
                             else:
                                 await event.message.answer("✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾")
