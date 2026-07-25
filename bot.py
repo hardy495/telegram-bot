@@ -174,17 +174,21 @@ def is_admin(user):
     return user.username and f"@{user.username}".lower() == ADMIN_USERNAME.lower()
 
 async def notify_admin_question(context, question, user):
-    admin_id = load_admin_chat_id() or ADMIN_CHAT_ID
+    admin_id = get_admin_chat_id()
     if not admin_id:
+        print(f"[TG] notify_admin_question: admin_id не найден!", flush=True)
         return
     username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user.id})"
-    msg = await context.bot.send_message(
-        chat_id=admin_id,
-        text=f"❓ *Вопрос от гостя {username}:*\n\n{question}\n\n"
-             f"_Нажмите Reply и напишите ответ — он уйдёт гостю автоматически_",
-        parse_mode="Markdown"
-    )
-    notification_to_guest[msg.message_id] = user.id
+    try:
+        msg = await context.bot.send_message(
+            chat_id=admin_id,
+            text=f"❓ *Вопрос/сообщение от гостя {username}:*\n\n{question}\n\n"
+                 f"_Нажмите Reply и напишите ответ — он уйдёт гостю автоматически_",
+            parse_mode="Markdown"
+        )
+        notification_to_guest[msg.message_id] = user.id
+    except Exception as e:
+        print(f"[TG] Ошибка notify_admin_question: {e}", flush=True)
 
 async def notify_admin_extension(context, user, days):
     if not get_admin_chat_id():
