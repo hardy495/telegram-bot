@@ -1142,6 +1142,32 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = guest_states.get(user_id)
     username = f"@{user.username}" if user.username else f"{user.first_name}"
 
+    # Обработка скриншота отзыва
+    if state == "waiting_review_screenshot":
+        apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
+        admin_id = get_admin_chat_id()
+        if admin_id:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=f"📸 *Скриншот отзыва от гостя*\n\n"
+                     f"Апартамент: *{apt_name}*\n"
+                     f"Гость: {username}\n\n"
+                     f"Отправьте промокод Reply на это сообщение — гость получит его автоматически!",
+                parse_mode="Markdown"
+            )
+            await context.bot.forward_message(
+                chat_id=admin_id,
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id
+            )
+            notification_to_guest[update.message.message_id] = user_id
+        guest_states[user_id] = "waiting_promo"
+        await update.message.reply_text(
+            "✅ Скриншот получен! Спасибо! 🙏\n\n"
+            "Мы проверим отзыв и пришлём вам персональный промокод в ближайшее время! 🎁"
+        )
+        return
+
     if state not in ["waiting_docs", "waiting_payment"]:
         await update.message.reply_text("Спасибо за документ! Если есть вопросы — задавайте 😊")
         return
@@ -1430,6 +1456,32 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = guest_states.get(user_id)
     username = f"@{user.username}" if user.username else f"{user.first_name}"
 
+    # Обработка скриншота отзыва
+    if state == "waiting_review_screenshot":
+        apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
+        admin_id = get_admin_chat_id()
+        if admin_id:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=f"📸 *Скриншот отзыва от гостя*\n\n"
+                     f"Апартамент: *{apt_name}*\n"
+                     f"Гость: {username}\n\n"
+                     f"Отправьте промокод Reply на это сообщение — гость получит его автоматически!",
+                parse_mode="Markdown"
+            )
+            fwd = await context.bot.forward_message(
+                chat_id=admin_id,
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id
+            )
+            notification_to_guest[fwd.message_id] = user_id
+        guest_states[user_id] = "waiting_promo"
+        await update.message.reply_text(
+            "✅ Скриншот получен! Спасибо! 🙏\n\n"
+            "Мы проверим отзыв и пришлём вам персональный промокод в ближайшее время! 🎁"
+        )
+        return
+
     # Принимаем фото только если гость в процессе верификации
     if state not in ["waiting_passport", "waiting_payment", "waiting_docs"]:
         await update.message.reply_text("Спасибо за фото! Если есть вопросы — задавайте 😊")
@@ -1681,11 +1733,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if reply_to.message_id in notification_to_guest:
                 guest_id = notification_to_guest[reply_to.message_id]
-                await context.bot.send_message(
-                    chat_id=guest_id,
-                    text=f"💬 *Ответ оператора:*\n\n{user_text}",
-                    parse_mode="Markdown"
-                )
+                guest_state = guest_states.get(guest_id)
+
+                if guest_state == "waiting_promo":
+                    # Это промокод — отправляем специальное сообщение
+                    await context.bot.send_message(
+                        chat_id=guest_id,
+                        text=f"🎁 *Ваш персональный промокод:*\n\n"
+                             f"`{user_text}`\n\n"
+                             f"Чтобы забронировать со скидкой — позвоните на горячую линию:\n"
+                             f"📞 *+7 918 148 00 45*\n\n"
+                             f"Назовите оператору ваш промокод и получите скидку!",
+                        parse_mode="Markdown"
+                    )
+                    await context.bot.send_message(
+                        chat_id=guest_id,
+                        text="Будем рады видеть вас снова в *Alekseev Apartments!* 🏠✨\n\n"
+                             "Спасибо что выбрали нас! 🙏",
+                        parse_mode="Markdown"
+                    )
+                    guest_states[guest_id] = "checkout_done"
+                else:
+                    # Обычный ответ оператора
+                    await context.bot.send_message(
+                        chat_id=guest_id,
+                        text=f"💬 *Ответ оператора:*\n\n{user_text}",
+                        parse_mode="Markdown"
+                    )
                 await update.message.reply_text("✅ Ответ отправлен гостю!")
                 return
 
@@ -2063,26 +2137,63 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if state == "waiting_feedback":
-        # Гость прислал обратную связь
         apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
         username = f"@{user.username}" if user.username else f"{user.first_name}"
 
-        if get_admin_chat_id():
+        # ИИ определяет тональность отзыва
+        sentiment = claude.messages.create(
+            model="claude-sonnet-4-6", max_tokens=10,
+            messages=[{"role": "user", "content":
+                f"Это отзыв гостя об отеле: \"{user_text}\"\n"
+                f"Ответь только одним словом: ПОЗИТИВНЫЙ или НЕГАТИВНЫЙ"}]
+        ).content[0].text.strip().upper()
+
+        # Отправляем отзыв администратору
+        admin_id = get_admin_chat_id()
+        if admin_id:
             await context.bot.send_message(
-                chat_id=get_admin_chat_id(),
-                text=f"⭐ *Обратная связь от гостя*\n\n"
+                chat_id=admin_id,
+                text=f"{'⭐' if 'ПОЗИТИВ' in sentiment else '⚠️'} *Отзыв от гостя*\n\n"
                      f"Апартамент: *{apt_name}*\n"
-                     f"Гость: {username}\n\n"
+                     f"Гость: {username}\n"
+                     f"Тональность: {'😊 Позитивный' if 'ПОЗИТИВ' in sentiment else '😞 Негативный'}\n\n"
                      f"{user_text}",
                 parse_mode="Markdown"
             )
+
+        if "ПОЗИТИВ" in sentiment:
+            guest_states[user_id] = "waiting_review_screenshot"
+            await update.message.reply_text(
+                "Спасибо за тёплые слова! 🙏 Нам очень приятно! 😊\n\n"
+                "Будем рады если вы оставите отзыв на той площадке через которую бронировали "
+                "(Авито, Островок, Яндекс Путешествия и т.д.).\n\n"
+                "🎁 *За скриншот отзыва мы подарим вам персональный промокод:*\n"
+                "• *500 руб.* на бронирование от 1 суток\n"
+                "• *1000 руб.* на бронирование от 2 суток\n\n"
+                "Пришлите скриншот сюда и мы пришлём ваш промокод! 📸",
+                parse_mode="Markdown"
+            )
+        else:
+            guest_states[user_id] = "checkout_done"
+            await update.message.reply_text(
+                "Нам очень жаль что что-то пошло не так. 😔\n\n"
+                "Мы обязательно свяжемся с вами чтобы разобраться в ситуации "
+                "и стать лучше.\n\n"
+                "Спасибо что сообщили нам об этом — это помогает нам развиваться! 🙏",
+                parse_mode="Markdown"
+            )
+        return
+
+    if state == "waiting_review_screenshot":
+        # Гость написал текст вместо скриншота
+        username = f"@{user.username}" if user.username else f"{user.first_name}"
         await update.message.reply_text(
-            "Спасибо за обратную связь! 🙏\n\n"
-            "Будем рады видеть вас снова в *Alekseev Apartments!* 🏠",
+            "Пожалуйста пришлите *скриншот* вашего отзыва 📸\n\n"
+            "Как только получим — пришлём ваш персональный промокод!",
             parse_mode="Markdown"
         )
-        guest_states[user_id] = "checkout_done"
         return
+
 
     if state == "waiting_review_and_requisites":
         # ИИ определяет — реквизиты или обратная связь
@@ -2737,18 +2848,47 @@ def start_max_bot():
 
         if state == "waiting_feedback":
             apt_name = max_apt.get(uid, "неизвестный апартамент")
-            await tg_admin(f"⭐ Отзыв (MAX)\nАпартамент: {apt_name}\nГость: {un}\n\n{text}")
-            await event.message.answer(
-                "Спасибо за обратную связь! 🙏\n\nБудем рады видеть вас снова в Alekseev Apartments! 🏠"
+
+            # ИИ определяет тональность
+            sentiment = claude.messages.create(
+                model="claude-sonnet-4-6", max_tokens=10,
+                messages=[{"role":"user","content":
+                    f"Это отзыв гостя: \"{text}\"\nОтветь только: ПОЗИТИВНЫЙ или НЕГАТИВНЫЙ"}]
+            ).content[0].text.strip().upper()
+
+            await tg_admin(
+                f"{'⭐' if 'ПОЗИТИВ' in sentiment else '⚠️'} Отзыв (MAX)\n"
+                f"Апартамент: {apt_name}\nГость: {un}\n"
+                f"Тональность: {'😊 Позитивный' if 'ПОЗИТИВ' in sentiment else '😞 Негативный'}\n\n{text}"
             )
-            max_states[uid] = "checkout_done_max"
+
+            if "ПОЗИТИВ" in sentiment:
+                max_states[uid] = "waiting_review_screenshot_max"
+                await event.message.answer(
+                    "Спасибо за тёплые слова! 🙏 Нам очень приятно! 😊\n\n"
+                    "Будем рады если вы оставите отзыв на площадке через которую бронировали "
+                    "(Авито, Островок, Яндекс Путешествия и т.д.).\n\n"
+                    "🎁 За скриншот отзыва мы подарим вам промокод:\n"
+                    "• 500 руб. от 1 суток\n"
+                    "• 1000 руб. от 2 суток\n\n"
+                    "Пришлите скриншот сюда! 📸"
+                )
+            else:
+                max_states[uid] = "checkout_done_max"
+                await event.message.answer(
+                    "Нам очень жаль что что-то пошло не так. 😔\n\n"
+                    "Мы обязательно свяжемся с вами чтобы разобраться в ситуации.\n\n"
+                    "Спасибо что сообщили нам — это помогает нам становиться лучше! 🙏"
+                )
             return
 
         if state == "checkout_done_max":
             await event.message.answer("Рады слышать вас! 😊\n\nДля новой брони:\n📞 +7 918 148 00 45")
             return
 
-
+        if state == "waiting_review_screenshot_max":
+            await event.message.answer("Пришлите пожалуйста скриншот вашего отзыва 📸")
+            return
 
         if state == "waiting_requisites":
             await tg_admin(f"💳 Реквизиты (MAX)\nАпартамент: {max_apt.get(uid, '?')}\nГость: {un}\n\n{text}")
