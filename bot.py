@@ -2163,6 +2163,7 @@ max_waiting = {}     # user_id ждёт пока админ внесёт бро�
 max_apt = {}         # user_id -> название апартамента
 max_outbox = {}      # user_id -> сообщение которое нужно отправить
 max_chat_ids = {}    # user_id -> chat_id для отправки
+tg_admin_tasks = []  # задачи из MAX потока для выполнения в Telegram
 _max_loop = None
 max_bot_instance = None
 
@@ -2280,28 +2281,8 @@ def start_max_bot():
         max_states[uid] = "waiting_admin_confirmation"
         cid = max_chat_ids.get(uid, uid)
         await max_send(uid, "✅ Все документы получены!\n\nДокументы переданы на проверку оплаты.\n⏱ Обычно до 10 минут.\n\nЕсли есть вопросы — я готов помочь! 😊")
-
-        # Отправляем кнопки "Получил / Не получил" администратору в Telegram
-        admin_id = get_admin_chat_id()
-        tg_tok = os.getenv("TELEGRAM_TOKEN")
-        if admin_id and tg_tok:
-            keyboard = {"inline_keyboard": [[
-                {"text": "✅ Получил", "callback_data": f"max_received_{uid}"},
-                {"text": "❌ Не получил", "callback_data": f"max_not_received_{uid}"}
-            ]]}
-            try:
-                import httpx as _hx
-                async with _hx.AsyncClient() as c:
-                    await c.post(
-                        f"https://api.telegram.org/bot{tg_tok}/sendMessage",
-                        json={
-                            "chat_id": admin_id,
-                            "text": f"✅ Все документы от гостя {un} (MAX) получены!\n\nОплата получена?",
-                            "reply_markup": keyboard
-                        }
-                    )
-            except Exception as e:
-                print(f"[MAX] Ошибка кнопок: {e}", flush=True)
+        # Сохраняем задачу для Telegram — отправить кнопки администратору
+        tg_admin_tasks.append({"type": "received_buttons", "max_uid": uid, "un": un})
 
     @md.bot_started()
     async def ms(event: BS):
@@ -2334,8 +2315,10 @@ def start_max_bot():
 
         # Обработка фото/документов
         if body and hasattr(body, 'attachments') and body.attachments:
+            print(f"[MAX] Фото от {uid}, state={state}, attachments={len(body.attachments)}", flush=True)
             for att in body.attachments:
                 att_url = getattr(att, 'url', None) or getattr(getattr(att, 'payload', None), 'url', None)
+                print(f"[MAX] att_url={att_url}, state={state}", flush=True)
 
                 if att_url and state in ["waiting_docs", "verified"]:
                     try:
