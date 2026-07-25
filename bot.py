@@ -598,6 +598,17 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
                 reply_markup=checkout_keyboard
             )
 
+        # Подсказка со стрелками на кнопки
+        await context.bot.send_message(
+            chat_id=guest_id,
+            text="━━━━━━━━━━━━━━━━━━━━\n\n"
+                 "Как только вы съедете с апартаментов — нажмите кнопку 👇\n"
+                 "👉 *🚪 Мы выехали*\n\n"
+                 "Если хотите продлить проживание или сделать новую бронь — нажмите 👇\n"
+                 "👉 *🔄 Продление/Новая бронь*",
+            parse_mode="Markdown"
+        )
+
         # Сохраняем апартамент гостя для контекста
         guest_states[guest_id] = "verified"
         context.bot_data.setdefault("guest_apt", {})[guest_id] = apt_name
