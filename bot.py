@@ -2373,6 +2373,24 @@ def start_max_bot():
         state = max_states.get(uid)
         body = event.message.body
 
+        # Если гость новый — показываем полное приветствие
+        if state is None:
+            max_states[uid] = "asking_name"
+            max_hist[uid] = []
+            max_docs[uid] = {}
+            await event.message.answer(
+                "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
+                "Благодарим вас за то что выбрали нас — мы рады каждому гостю! 🏠✨\n\n"
+                "Меня зовут Алекс — я ИИ-ассистент Alekseev Apartments.\n"
+                "Я помогу вам с заселением:\n\n"
+                "✅ Приму оплату и проверю документы\n"
+                "🔑 Заселю вас дистанционно через минисейф\n"
+                "💬 Отвечу на все вопросы по размещению\n\n"
+                "Напишите пожалуйста имя на которое оформлена бронь и даты заезда/выезда:\n\n"
+                "Например: Иванов Иван с 01.01 по 02.01"
+            )
+            return
+
         # Обработка фото/документов
         if body and hasattr(body, 'attachments') and body.attachments:
             print(f"[MAX] Фото от {uid}, state={state}, attachments={len(body.attachments)}", flush=True)
