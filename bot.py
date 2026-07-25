@@ -2263,19 +2263,44 @@ def start_max_bot():
             elif ln.upper().startswith("ВЫЕЗД:"): dto=ln.split(":",1)[-1].strip()
         return name, dfrom, dto
 
-    async def analyze_image_max(img_bytes, check_type, media_type="image/jpeg"):
+    async def analyze_image_max(img_bytes, check_type, media_type="image/jpeg", expected_amount=None):
         import base64
         img_b64 = base64.standard_b64encode(img_bytes).decode()
         if check_type == "passport":
-            prompt = "Это паспорт? Ответь только ДА или НЕТ."
+            prompt = "Это паспорт гражданина? Ответь только ДА или НЕТ."
         else:
-            prompt = "Это чек об оплате? Ответь только ДА или НЕТ."
-        r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=5,
+            if expected_amount:
+                prompt = (f"Это чек об оплате или банковское подтверждение перевода? "
+                         f"Если да — найди сумму перевода. Ожидаемая сумма: {expected_amount} руб.\n"
+                         f"Ответь в формате: ЧЕК:ДА:СУММА или ЧЕК:НЕТ или НЕ_ЧЕК")
+            else:
+                prompt = "Это чек об оплате или банковское подтверждение перевода? Ответь только ДА или НЕТ."
+        r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=30,
             messages=[{"role":"user","content":[
                 {"type":"image","source":{"type":"base64","media_type": media_type,"data":img_b64}},
                 {"type":"text","text":prompt}
             ]}])
-        return r.content[0].text.strip().upper().startswith("ДА")
+        result = r.content[0].text.strip().upper()
+        print(f"[MAX] ИИ ответ ({check_type}): {result}", flush=True)
+
+        if check_type == "passport":
+            return result.startswith("ДА"), None
+
+        # Для чека
+        if expected_amount and "ЧЕК:ДА:" in result:
+            # Извлекаем сумму
+            try:
+                found_amount = int(''.join(filter(str.isdigit, result.split("ЧЕК:ДА:")[-1])))
+                if found_amount == expected_amount:
+                    return True, found_amount
+                else:
+                    return True, -found_amount  # отрицательное = не совпала сумма
+            except:
+                return True, None
+        elif "ЧЕК:ДА" in result or result.startswith("ДА"):
+            return True, None
+        else:
+            return False, None
 
     async def finalize_max_docs(uid, un):
         max_states[uid] = "waiting_admin_confirmation"
@@ -2326,6 +2351,7 @@ def start_max_bot():
                         async with _hx.AsyncClient() as hc:
                             img_resp = await hc.get(att_url)
                             img_bytes = img_resp.content
+                        print(f"[MAX] Скачано {len(img_bytes)} байт", flush=True)
 
                         # Определяем формат по magic bytes
                         if img_bytes[:4] == b'RIFF' and img_bytes[8:12] == b'WEBP':
@@ -2334,30 +2360,53 @@ def start_max_bot():
                             media_type = "image/png"
                         elif img_bytes[:3] == b'\xff\xd8\xff':
                             media_type = "image/jpeg"
-                        elif img_bytes[:4] in (b'%PDF',):
+                        elif img_bytes[:4] == b'%PDF':
                             media_type = "application/pdf"
                         else:
                             media_type = "image/jpeg"
+                        print(f"[MAX] media_type={media_type}", flush=True)
 
                         has_passport = max_docs.get(uid, {}).get("has_passport", False)
                         has_payment = max_docs.get(uid, {}).get("has_payment", False)
+                        print(f"[MAX] has_passport={has_passport}, has_payment={has_payment}", flush=True)
 
                         await event.message.answer("🔍 Проверяю документ...")
 
+                        # Получаем ожидаемую сумму
+                        guest_info = max_guest_names.get(uid, {})
+                        guest_name_lower = guest_info.get("name", "").lower()
+                        expected_amount = None
+                        bals = load_balances_from_file()
+                        for k, d in bals.items():
+                            if d["name_lower"] in guest_name_lower or guest_name_lower in d["name_lower"]:
+                                expected_amount = DEPOSIT if d["amount"] == 0 else d["amount"] + DEPOSIT
+                                break
+
                         if media_type == "application/pdf":
-                            # PDF передаём как документ в Claude
                             pdf_data = base64.standard_b64encode(img_bytes).decode()
-                            r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=10,
+                            r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=30,
                                 messages=[{"role":"user","content":[
                                     {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_data}},
-                                    {"type":"text","text":"Что в документе? Ответь только: ПАСПОРТ, ЧЕК или ДРУГОЕ"}
+                                    {"type":"text","text":f"Что в документе? Если чек — укажи сумму. Ожидаемая: {expected_amount} руб. Ответь: ПАСПОРТ или ЧЕК:СУММА или ДРУГОЕ"}
                                 ]}])
                             doc_result = r.content[0].text.strip().upper()
+                            print(f"[MAX] PDF: {doc_result}", flush=True)
                             is_passport = "ПАСПОРТ" in doc_result
                             is_check = "ЧЕК" in doc_result
+                            found_amount = None
+                            if is_check and ":" in doc_result:
+                                try:
+                                    found_amount = int(''.join(filter(str.isdigit, doc_result.split("ЧЕК:")[-1])))
+                                except:
+                                    pass
                         else:
-                            is_passport = await analyze_image_max(img_bytes, "passport", media_type)
-                            is_check = not is_passport and await analyze_image_max(img_bytes, "payment", media_type)
+                            is_passport, _ = await analyze_image_max(img_bytes, "passport", media_type)
+                            if not is_passport:
+                                is_check, found_amount = await analyze_image_max(img_bytes, "payment", media_type, expected_amount)
+                            else:
+                                is_check, found_amount = False, None
+
+                        print(f"[MAX] is_passport={is_passport}, is_check={is_check}, found_amount={found_amount}", flush=True)
 
                         if is_passport and not has_passport:
                             await tg_admin(f"📄 Паспорт от гостя {un} (MAX) ✅\n{att_url}")
@@ -2367,12 +2416,26 @@ def start_max_bot():
                             else:
                                 await event.message.answer("✅ Паспорт принят!\n\nТеперь пришлите чек об оплате 🧾")
                         elif is_check and not has_payment:
-                            await tg_admin(f"🧾 Чек от гостя {un} (MAX) ✅\n{att_url}")
-                            max_docs.setdefault(uid, {})["has_payment"] = True
-                            if max_docs[uid].get("has_passport"):
-                                await finalize_max_docs(uid, un)
+                            # Проверяем сумму
+                            if found_amount and found_amount < 0:
+                                real_amount = abs(found_amount)
+                                await tg_admin(
+                                    f"⚠️ Чек от гостя {un} (MAX)\n"
+                                    f"Сумма в чеке: {real_amount} руб.\n"
+                                    f"Запрошенная: {expected_amount} руб.\n❌ СУММЫ НЕ СОВПАДАЮТ\n{att_url}"
+                                )
+                                await event.message.answer("⚠️ Сумма в чеке не совпадает.\n\nЧек передан администратору на проверку. ⏱")
+                                max_docs.setdefault(uid, {})["has_payment"] = True
+                                if max_docs[uid].get("has_passport"):
+                                    await finalize_max_docs(uid, un)
                             else:
-                                await event.message.answer("✅ Чек принят!\n\nТеперь пришлите фото паспорта 📄")
+                                amount_str = f"{expected_amount} руб. ✅" if expected_amount else "не определена"
+                                await tg_admin(f"🧾 Чек от гостя {un} (MAX)\nСумма: {amount_str}\n{att_url}")
+                                max_docs.setdefault(uid, {})["has_payment"] = True
+                                if max_docs[uid].get("has_passport"):
+                                    await finalize_max_docs(uid, un)
+                                else:
+                                    await event.message.answer("✅ Чек принят!\n\nТеперь пришлите фото паспорта 📄")
                         elif is_passport and has_passport:
                             await event.message.answer("📄 Паспорт уже получен. Пришлите чек 🧾")
                         elif is_check and has_payment:
@@ -2381,7 +2444,8 @@ def start_max_bot():
                             await tg_admin(f"📎 Документ от гостя {un} (MAX) — не определён\n{att_url}")
                             await event.message.answer("Документ передан администратору на проверку. ⏱")
                     except Exception as e:
-                        print(f"[MAX] Фото ошибка: {e}", flush=True)
+                        import traceback
+                        print(f"[MAX] Фото ошибка: {e}\n{traceback.format_exc()}", flush=True)
                         await tg_admin(f"📎 Файл от гостя {un} (MAX): {att_url}")
                         await event.message.answer("Документ получен! Передан на проверку. ⏱")
                 elif att_url and state in ["asking_name", "waiting_balance"]:
