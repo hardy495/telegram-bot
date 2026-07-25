@@ -1731,6 +1731,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("Пожалуйста ответьте *ДА* или *НЕТ*", parse_mode="Markdown")
                 return
 
+            # Проверяем промокод для MAX гостя
+            if reply_to.message_id in max_promo_map:
+                max_uid = max_promo_map[reply_to.message_id]
+                max_cid = max_chat_ids.get(max_uid, max_uid)
+                max_outbox[max_uid] = {
+                    "text": f"🎁 Ваш персональный промокод:\n\n{user_text}\n\n"
+                           f"Чтобы забронировать со скидкой — позвоните:\n"
+                           f"📞 +7 918 148 00 45\n\n"
+                           f"Назовите оператору ваш промокод и получите скидку!\n\n"
+                           f"Будем рады видеть вас снова в Alekseev Apartments! 🏠✨"
+                }
+                max_states[max_uid] = "checkout_done_max"
+                del max_promo_map[reply_to.message_id]
+                await update.message.reply_text("✅ Промокод отправлен гостю в MAX!")
+                return
+
             if reply_to.message_id in notification_to_guest:
                 guest_id = notification_to_guest[reply_to.message_id]
                 guest_state = guest_states.get(guest_id)
@@ -2401,6 +2417,7 @@ max_waiting = {}     # user_id ждёт пока админ внесёт бро�
 max_apt = {}         # user_id -> название апартамента
 max_outbox = {}      # user_id -> сообщение которое нужно отправить
 max_chat_ids = {}    # user_id -> chat_id для отправки
+max_promo_map = {}   # message_id в TG -> MAX user_id (для отправки промокода)
 tg_admin_tasks = []  # задачи из MAX потока для выполнения в Telegram
 _max_loop = None
 max_bot_instance = None
@@ -2625,6 +2642,40 @@ def start_max_bot():
             for att in body.attachments:
                 att_url = getattr(att, 'url', None) or getattr(getattr(att, 'payload', None), 'url', None)
                 print(f"[MAX] att_url={att_url}, state={state}", flush=True)
+
+                if att_url and state == "waiting_review_screenshot_max":
+                    apt_name = max_apt.get(uid, "неизвестный апартамент")
+                    tg_tok = os.getenv("TELEGRAM_TOKEN")
+                    admin_id = get_admin_chat_id()
+                    if admin_id and tg_tok:
+                        try:
+                            import httpx as _hx
+                            async with _hx.AsyncClient() as c:
+                                r = await c.post(
+                                    f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                                    json={
+                                        "chat_id": admin_id,
+                                        "text": f"📸 Скриншот отзыва (MAX)\n\nАпартамент: {apt_name}\nГость: {un}\n\nОтправьте промокод Reply на это сообщение — гость получит его автоматически!"
+                                    }
+                                )
+                                msg_data = r.json()
+                                if msg_data.get("ok"):
+                                    msg_id = msg_data["result"]["message_id"]
+                                    max_promo_map[msg_id] = uid
+                            # Также отправляем само фото
+                            async with _hx.AsyncClient() as c:
+                                await c.post(
+                                    f"https://api.telegram.org/bot{tg_tok}/sendPhoto",
+                                    json={"chat_id": admin_id, "photo": att_url}
+                                )
+                        except Exception as e:
+                            print(f"[MAX] Ошибка отправки скриншота: {e}", flush=True)
+                    max_states[uid] = "waiting_promo_max"
+                    await event.message.answer(
+                        "✅ Скриншот получен! Спасибо! 🙏\n\n"
+                        "Мы проверим отзыв и пришлём вам персональный промокод в ближайшее время! 🎁"
+                    )
+                    return
 
                 if att_url and state in ["waiting_docs", "verified"]:
                     try:
