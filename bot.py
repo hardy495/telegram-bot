@@ -1764,12 +1764,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             guest_states[user_id] = "waiting_balance"
+            # Уведомляем администратора
+            admin_id = get_admin_chat_id()
+            if admin_id:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🆕 Новый гость ищет бронь!\n\n"
+                         f"Имя: *{name}*\n"
+                         f"Заезд: {date_from or '?'} | Выезд: {date_to or '?'}\n\n"
+                         f"Бронь не найдена — добавьте:\n"
+                         f"`/b {name} с {date_from} по {date_to} СУММА`",
+                    parse_mode="Markdown"
+                )
             await update.message.reply_text(
                 f"🔍 Бронирование на имя *{name}*"
                 f"{f' с {date_from} по {date_to}' if date_from else ''}"
                 f" не найдено в нашей системе.\n\n"
-                f"Пожалуйста, проверьте правильность ФИО и дат.\n"
-                f"Или подождите — уточним у администратора и свяжемся в течение 10 минут. ⏱",
+                f"Не переживайте — мы уже направили уведомление администратору! ✅\n\n"
+                f"Он подгрузит вашу бронь в систему в течение *15 минут*, "
+                f"после чего вам автоматически придёт вся информация. ⏱",
                 parse_mode="Markdown"
             )
         return
@@ -2562,8 +2575,12 @@ def start_max_bot():
                 max_states[uid] = "waiting_balance"
                 max_waiting[uid] = {"name": name, "date_from": dfrom, "date_to": dto}
                 await event.message.answer(
-                    f"Бронирование на имя {name} не найдено в системе.\n\n"
-                    f"Уточняем информацию — оператор свяжется с вами в течение 10 минут. ⏱"
+                    f"🔍 Бронирование на имя {name}"
+                    f"{f' с {dfrom} по {dto}' if dfrom else ''}"
+                    f" не найдено в нашей системе.\n\n"
+                    f"Не переживайте — мы уже направили уведомление администратору! ✅\n\n"
+                    f"Он подгрузит вашу бронь в систему в течение 15 минут, "
+                    f"после чего вам автоматически придёт вся информация. ⏱"
                 )
                 return
             amt = bd["amount"]
