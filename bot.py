@@ -2112,28 +2112,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if state == "waiting_requisites":
-        # Гость прислал реквизиты — пересылаем администратору
         apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
         username = f"@{user.username}" if user.username else f"{user.first_name}"
 
-        if get_admin_chat_id():
-            await context.bot.send_message(
-                chat_id=get_admin_chat_id(),
-                text=f"💳 *Реквизиты для возврата залога*\n\n"
-                     f"Апартамент: *{apt_name}*\n"
-                     f"Гость: {username}\n\n"
-                     f"Реквизиты:\n{user_text}",
+        # ИИ определяет — это реквизиты или отзыв/что-то другое
+        check = claude.messages.create(
+            model="claude-sonnet-4-6", max_tokens=10,
+            messages=[{"role": "user", "content":
+                f"Это реквизиты для перевода денег (содержит номер телефона, банк или ФИО)? "
+                f"Текст: \"{user_text}\"\nОтветь только: РЕКВИЗИТЫ или НЕТ"}]
+        ).content[0].text.strip().upper()
+
+        if "РЕКВИЗИТЫ" in check:
+            if get_admin_chat_id():
+                await context.bot.send_message(
+                    chat_id=get_admin_chat_id(),
+                    text=f"💳 *Реквизиты для возврата залога*\n\n"
+                         f"Апартамент: *{apt_name}*\n"
+                         f"Гость: {username}\n\n"
+                         f"Реквизиты:\n{user_text}",
+                    parse_mode="Markdown"
+                )
+            await update.message.reply_text(
+                "Благодарим вас за реквизиты! ✅\n\n"
+                "Залог вернём сегодня до 00:00.\n\n"
+                "Будем рады если вы оставите нам обратную связь здесь в чате — "
+                "ваше мнение очень важно для нас! 😊",
                 parse_mode="Markdown"
             )
-        # Благодарим и просим оставить обратную связь
-        await update.message.reply_text(
-            "Благодарим вас за реквизиты! ✅\n\n"
-            "Залог вернём сегодня до 00:00.\n\n"
-            "Будем рады если вы оставите нам обратную связь здесь в чате — "
-            "ваше мнение очень важно для нас! 😊",
-            parse_mode="Markdown"
-        )
-        guest_states[user_id] = "waiting_feedback"
+            guest_states[user_id] = "waiting_feedback"
+        else:
+            # Гость написал что-то другое — напоминаем про реквизиты
+            await update.message.reply_text(
+                "Для возврата залога пришлите пожалуйста ваши реквизиты:\n\n"
+                "_Номер телефона / Банк / ФИО получателя_\n\n"
+                "_Например: +79001234567 / Сбербанк / Иванов Иван Иванович_",
+                parse_mode="Markdown"
+            )
         return
 
     if state == "waiting_feedback":
