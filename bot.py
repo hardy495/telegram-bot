@@ -168,6 +168,7 @@ SYSTEM_PROMPT = """Ты вежливый и профессиональный п�
 Если гость спрашивает про ранний заезд — верни ровно: [РАННИЙ_ЗАЕЗД]
 Если гость спрашивает про поздний выезд — верни ровно: [ПОЗДНИЙ_ВЫЕЗД]
 Если гость хочет продлить проживание — верни ровно: [ПРОДЛЕНИЕ]
+Если гость сообщает что УЖЕ выехал или съехал прямо сейчас — верни ровно: [ВЫЕХАЛ]
 Если не можешь ответить на вопрос — верни ровно: [НУЖЕН_ОПЕРАТОР]
 """
 
@@ -645,12 +646,14 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
     # Кнопка "Продление/Новая бронь"
     elif query.data.startswith("newbooking_"):
         guest_id = int(query.data.split("_")[1])
-        await query.edit_message_reply_markup(reply_markup=None)
+        await query.answer()  # просто закрываем спиннер, не убираем кнопки
         await context.bot.send_message(
             chat_id=guest_id,
             text="Рады слышать вас! 🎉\n\n"
-                 "Укажите пожалуйста даты — с какой по какую дату вы хотите забронировать?\n\n"
-                 "_Например: с 01.07 по 05.07_",
+                 "Для продления или новой брони укажите пожалуйста:\n\n"
+                 "📅 *Даты* — с какой по какую дату?\n"
+                 "📞 *Номер телефона* для связи\n\n"
+                 "_Например: с 01.07 по 05.07, тел: +79001234567_",
             parse_mode="Markdown"
         )
         guest_states[guest_id] = "waiting_new_booking_dates"
@@ -2185,6 +2188,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif "[ПОЗДНИЙ_ВЫЕЗД]" in reply:
         guest_states[user_id] = "waiting_time_late"
         await ask_guest_time(update, "late")
+    elif "[ВЫЕХАЛ]" in reply:
+        apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "апартамент")
+        admin_id = get_admin_chat_id()
+        if admin_id:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=f"🚪 *{apt_name} — выехали*",
+                parse_mode="Markdown"
+            )
+        guest_states[user_id] = "waiting_requisites"
+        await update.message.reply_text(
+            "Спасибо что выбрали Alekseev Apartments! 🙏\n\n"
+            "Для возврата залога пришлите пожалуйста ваши реквизиты:\n\n"
+            "Номер телефона / Банк / ФИО получателя\n\n"
+            "_Например: +79001234567 / Сбербанк / Иванов Иван Иванович_",
+            parse_mode="Markdown"
+        )
     elif "[ПРОДЛЕНИЕ]" in reply:
         # Показываем кнопку продления рядом с инструкцией и номер горячей линии
         extension_keyboard = InlineKeyboardMarkup([
