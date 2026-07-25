@@ -2304,10 +2304,31 @@ def start_max_bot():
 
     async def finalize_max_docs(uid, un):
         max_states[uid] = "waiting_admin_confirmation"
-        cid = max_chat_ids.get(uid, uid)
         await max_send(uid, "✅ Все документы получены!\n\nДокументы переданы на проверку оплаты.\n⏱ Обычно до 10 минут.\n\nЕсли есть вопросы — я готов помочь! 😊")
-        # Сохраняем задачу для Telegram — отправить кнопки администратору
-        tg_admin_tasks.append({"type": "received_buttons", "max_uid": uid, "un": un})
+
+        # Отправляем кнопки "Получил/Не получил" администратору в Telegram напрямую
+        admin_id = get_admin_chat_id()
+        tg_tok = os.getenv("TELEGRAM_TOKEN")
+        print(f"[MAX] finalize: admin_id={admin_id}, tok={'есть' if tg_tok else 'нет'}", flush=True)
+        if admin_id and tg_tok:
+            keyboard = {"inline_keyboard": [[
+                {"text": "✅ Получил", "callback_data": f"max_received_{uid}"},
+                {"text": "❌ Не получил", "callback_data": f"max_not_received_{uid}"}
+            ]]}
+            try:
+                import httpx as _hx
+                async with _hx.AsyncClient() as c:
+                    resp = await c.post(
+                        f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                        json={
+                            "chat_id": admin_id,
+                            "text": f"✅ Все документы от гостя {un} (MAX) получены!\n\nОплата получена?",
+                            "reply_markup": keyboard
+                        }
+                    )
+                    print(f"[MAX] TG кнопки: {resp.status_code} {resp.text[:100]}", flush=True)
+            except Exception as e:
+                print(f"[MAX] Ошибка TG кнопок: {e}", flush=True)
 
     @md.bot_started()
     async def ms(event: BS):
