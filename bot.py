@@ -120,6 +120,7 @@ SYSTEM_PROMPT = """Ты вежливый и профессиональный п�
 
 === ОСНАЩЕНИЕ ВСЕХ АПАРТАМЕНТОВ ===
 Во всех апартаментах есть: утюг, гладильная доска, полотенца, постельное бельё, фен, гель для душа.
+Если гость спрашивает где взять дополнительное бельё или полотенца — они находятся в шкафу. Если в шкафу нет — можно взять с сушилки.
 
 === ПАРКОВКА И ВЪЕЗД НА ТЕРРИТОРИЮ ===
 Для апартаментов на ул. Октябрьской:
@@ -162,6 +163,7 @@ SYSTEM_PROMPT = """Ты вежливый и профессиональный п�
 - Помогай с любыми вопросами кроме инструкций по заселению
 - Не придумывай информацию которой нет в базе
 
+Если гость выражает недовольство, жалобу или претензию (грязно, сломано, не работает, плохо, не нравится, холодно, шумно и т.п.) — обязательно: 1) искренне извинись от имени команды, 2) постарайся помочь если есть знания по теме, 3) сообщи что передаёшь информацию оператору. В конце ответа добавь ровно: [ЖАЛОБА]
 Если гость спрашивает про ранний заезд — верни ровно: [РАННИЙ_ЗАЕЗД]
 Если гость спрашивает про поздний выезд — верни ровно: [ПОЗДНИЙ_ВЫЕЗД]
 Если гость хочет продлить проживание — верни ровно: [ПРОДЛЕНИЕ]
@@ -2140,10 +2142,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif "[НУЖЕН_ОПЕРАТОР]" in reply:
         await notify_admin_question(context, user_text, user)
+        clean_reply = reply.replace("[НУЖЕН_ОПЕРАТОР]", "").strip()
+        if clean_reply:
+            await update.message.reply_text(clean_reply)
         await update.message.reply_text(
-            "Спасибо за ваш вопрос! 🙏\n\n"
-            "По этому вопросу с вами свяжется оператор в течение 10 минут."
+            "Также передал ваш вопрос оператору — он свяжется с вами в ближайшее время! 😊"
         )
+        conversation_history[user_id].append({"role": "assistant", "content": clean_reply or reply})
+    elif "[ЖАЛОБА]" in reply:
+        # Уведомляем администратора тихо и отвечаем гостю
+        await notify_admin_question(context, f"⚠️ ЖАЛОБА/ПРЕТЕНЗИЯ:\n{user_text}", user)
+        clean_reply = reply.replace("[ЖАЛОБА]", "").strip()
+        conversation_history[user_id].append({"role": "assistant", "content": clean_reply})
+        await update.message.reply_text(clean_reply)
     else:
         conversation_history[user_id].append({"role": "assistant", "content": reply})
         await update.message.reply_text(reply)
@@ -2690,7 +2701,16 @@ def start_max_bot():
 
         if "[НУЖЕН_ОПЕРАТОР]" in reply:
             await tg_admin(f"❓ Вопрос (MAX) от {un}:\n\n{text}")
-            await event.message.answer("Спасибо за вопрос! 🙏\n\nОператор свяжется в течение 10 минут.\n\nИли: 📞 +7 918 148 00 45")
+            clean_reply = reply.replace("[НУЖЕН_ОПЕРАТОР]", "").strip()
+            if clean_reply:
+                max_hist[uid].append({"role":"assistant","content":clean_reply})
+                await event.message.answer(clean_reply)
+            await event.message.answer("Также передал ваш вопрос оператору — свяжемся в ближайшее время! 😊")
+        elif "[ЖАЛОБА]" in reply:
+            await tg_admin(f"⚠️ ЖАЛОБА/ПРЕТЕНЗИЯ (MAX) от {un}:\n\n{text}")
+            clean_reply = reply.replace("[ЖАЛОБА]", "").strip()
+            max_hist[uid].append({"role":"assistant","content":clean_reply})
+            await event.message.answer(clean_reply)
         elif "[ПРОДЛЕНИЕ]" in reply:
             await tg_admin(f"🔄 Продление (MAX) от {un}:\n{text}")
             await event.message.answer("Для продления:\n\n1️⃣ Напишите даты — мы уточним\n2️⃣ Или: 📞 +7 918 148 00 45")
