@@ -2446,6 +2446,33 @@ async def tg_admin(text):
     except Exception as e:
         print(f"[MAX] TG notify error: {e}", flush=True)
 
+async def tg_admin_photo(caption, photo_url, media_type="image/jpeg"):
+    """Скачать файл из MAX и отправить как фото/документ администратору в Telegram"""
+    aid = os.getenv("ADMIN_CHAT_ID")
+    tok = os.getenv("TELEGRAM_TOKEN")
+    if not aid or not tok:
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30) as c:
+            resp = await c.get(photo_url)
+            file_bytes = resp.content
+            if media_type == "application/pdf":
+                await c.post(
+                    f"https://api.telegram.org/bot{tok}/sendDocument",
+                    data={"chat_id": aid, "caption": caption},
+                    files={"document": ("document.pdf", file_bytes, "application/pdf")}
+                )
+            else:
+                await c.post(
+                    f"https://api.telegram.org/bot{tok}/sendPhoto",
+                    data={"chat_id": aid, "caption": caption},
+                    files={"photo": ("photo.jpg", file_bytes, "image/jpeg")}
+                )
+    except Exception as e:
+        print(f"[MAX] TG photo error: {e}", flush=True)
+        await tg_admin(f"{caption}\n{photo_url}")
+
 async def tg_forward_photo(photo_url, caption):
     """Переслать фото администратору в Telegram"""
     aid = os.getenv("ADMIN_CHAT_ID")
@@ -2748,7 +2775,7 @@ def start_max_bot():
                         print(f"[MAX] is_passport={is_passport}, is_check={is_check}, found_amount={found_amount}", flush=True)
 
                         if is_passport and not has_passport:
-                            await tg_admin(f"📄 Паспорт от гостя {un} (MAX) ✅\n{att_url}")
+                            await tg_admin_photo(f"📄 Паспорт от гостя {un} (MAX) ✅", att_url, media_type)
                             max_docs.setdefault(uid, {})["has_passport"] = True
                             print(f"[MAX] Паспорт принят, has_payment={max_docs[uid].get('has_payment')}", flush=True)
                             if max_docs[uid].get("has_payment"):
@@ -2771,7 +2798,7 @@ def start_max_bot():
                                     await finalize_max_docs(uid, un)
                             else:
                                 amount_str = f"{expected_amount} руб. ✅" if expected_amount else "не определена"
-                                await tg_admin(f"🧾 Чек от гостя {un} (MAX)\nСумма: {amount_str}\n{att_url}")
+                                await tg_admin_photo(f"🧾 Чек от гостя {un} (MAX)\nСумма: {amount_str}", att_url, media_type)
                                 max_docs.setdefault(uid, {})["has_payment"] = True
                                 if max_docs[uid].get("has_passport"):
                                     await finalize_max_docs(uid, un)
@@ -2782,12 +2809,12 @@ def start_max_bot():
                         elif is_check and has_payment:
                             await event.message.answer("🧾 Чек уже получен. Пришлите паспорт 📄")
                         else:
-                            await tg_admin(f"📎 Документ от гостя {un} (MAX) — не определён\n{att_url}")
+                            await tg_admin_photo(f"📎 Документ от гостя {un} (MAX) — не определён", att_url, media_type)
                             await event.message.answer("Документ передан администратору на проверку. ⏱")
                     except Exception as e:
                         import traceback
                         print(f"[MAX] Фото ошибка: {e}\n{traceback.format_exc()}", flush=True)
-                        await tg_admin(f"📎 Файл от гостя {un} (MAX): {att_url}")
+                        await tg_admin_photo(f"📎 Файл от гостя {un} (MAX)", att_url)
                         await event.message.answer("Документ получен! Передан на проверку. ⏱")
                 elif att_url and state in ["asking_name", "waiting_balance"]:
                     await event.message.answer("Пожалуйста сначала напишите имя и даты бронирования.")
@@ -3046,7 +3073,7 @@ def start_max_bot():
                                 await mb.send_message(
                                     chat_id=cid,
                                     text="━━━━━━━━━━━━━━━━━━━━\n\n"
-                                         "🚪 Когда будете готовы к выезду — просто напишите нам об этом\n\n"
+                                         "🔑 Когда будете выезжать — положите ключи в минисейф и напишите нам сюда что вы выехали\n\n"
                                          "🔄 Хотите продлить проживание или сделать новую бронь? Тоже пишите — поможем!\n\n"
                                          "Мы всегда на связи! 😊"
                                 )
