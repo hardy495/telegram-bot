@@ -2346,7 +2346,7 @@ def start_max_bot():
         # Сохраняем chat_id для отправки сообщений
         chat_id = getattr(event.message, 'recipient', None)
         chat_id = getattr(chat_id, 'chat_id', None) or uid
-        max_states[uid] = "greeted"
+        max_states[uid] = "asking_name"
         max_hist[uid] = []
         max_docs[uid] = {}
         max_chat_ids[uid] = chat_id  # сохраняем chat_id
@@ -2508,16 +2508,7 @@ def start_max_bot():
             await event.message.answer(pending_msg)
             return
 
-        # Если только поздоровались — ждём имя
-        if state in [None, "greeted"]:
-            max_states[uid] = "asking_name"
-            max_hist[uid] = []
-            max_docs[uid] = {}
-            await event.message.answer(
-                "Напишите пожалуйста имя на которое оформлена бронь и даты заезда/выезда:\n\n"
-                "Например: Иванов Иван с 01.01 по 02.01"
-            )
-            return
+        # state=asking_name обрабатывается ниже вместе с waiting_balance
 
         if state in ["asking_name", "waiting_balance"]:
             name, dfrom, dto = await parse_name_dates(text)
