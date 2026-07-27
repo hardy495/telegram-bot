@@ -13,6 +13,14 @@ claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 ADMIN_USERNAME = "@Hardy495"
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
+def escape_md(text):
+    """Экранирует спецсимволы Markdown"""
+    if not text:
+        return ""
+    for ch in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+        text = text.replace(ch, f'\\{ch}')
+    return text
+
 MEMORY_FILE = "memory.json"
 ADMIN_FILE = "admin.json"
 BALANCES_FILE = "balances.json"
@@ -1225,8 +1233,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if get_admin_chat_id():
                 await context.bot.send_message(
                     chat_id=get_admin_chat_id(),
-                    text=f"📄 *Паспорт (PDF) от гостя:* {username} (ID: {user_id})\n✅ ИИ подтвердил",
-                    parse_mode="Markdown"
+                    text=f"📄 Паспорт (PDF) от гостя: {username} (ID: {user_id})\n✅ ИИ подтвердил"
                 )
                 await context.bot.forward_message(
                     chat_id=get_admin_chat_id(),
@@ -1356,8 +1363,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if get_admin_chat_id():
             await context.bot.send_message(
                 chat_id=get_admin_chat_id(),
-                text=f"📄 *Паспорт (PDF) от гостя:* {username} (ID: {user_id})\n✅ ИИ подтвердил",
-                parse_mode="Markdown"
+                text=f"📄 Паспорт (PDF) от гостя: {username} (ID: {user_id})\n✅ ИИ подтвердил"
             )
             await context.bot.forward_message(
                 chat_id=get_admin_chat_id(),
@@ -1518,8 +1524,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if get_admin_chat_id():
             await context.bot.send_message(
                 chat_id=get_admin_chat_id(),
-                text=f"📄 *Паспорт от гостя:* {username} (ID: {user_id})\n✅ ИИ подтвердил",
-                parse_mode="Markdown"
+                text=f"📄 Паспорт от гостя: {username} (ID: {user_id})\n✅ ИИ подтвердил"
             )
             await context.bot.forward_message(
                 chat_id=get_admin_chat_id(),
@@ -1881,7 +1886,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if admin_id:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=f"🆕 Новый гость: *{name}*\n"
+                    text=f"🆕 Новый гость: {name}\n"
                          f"Заезд: {date_from or '?'} | Выезд: {date_to or '?'}\n"
                          f"Бронь не найдена в базе.",
                     parse_mode="Markdown"
@@ -1913,14 +1918,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(
                     chat_id=admin_id,
                     text=f"🆕 Новый гость ищет бронь!\n\n"
-                         f"Имя: *{name}*\n"
+                         f"Имя: {name}\n"
                          f"Заезд: {date_from or '?'} | Выезд: {date_to or '?'}\n\n"
                          f"Бронь не найдена — добавьте:\n"
                          f"`/b {name} с {date_from} по {date_to} СУММА`",
                     parse_mode="Markdown"
                 )
             await update.message.reply_text(
-                f"🔍 Бронирование на имя *{name}*"
+                f"🔍 Бронирование на имя {name}"
                 f"{f' с {date_from} по {date_to}' if date_from else ''}"
                 f" не найдено в нашей системе.\n\n"
                 f"Не переживайте — мы уже направили уведомление администратору! ✅\n\n"
@@ -2020,7 +2025,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(
-                f"🔍 Бронирование на имя *{name}*"
+                f"🔍 Бронирование на имя {name}"
                 f"{f' с {date_from} по {date_to}' if date_from else ''}"
                 f" не найдено.\n\n"
                 f"Пожалуйста, проверьте правильность написания имени и дат и напишите снова.\n\n"
