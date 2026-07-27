@@ -687,6 +687,28 @@ async def ask_guest_time(update, request_type):
             parse_mode="Markdown"
         )
 
+async def newbook(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /newbook — начать новое бронирование"""
+    user_id = update.effective_user.id
+    if is_admin(update.effective_user):
+        return
+    guest_states[user_id] = "asking_name"
+    conversation_history[user_id] = []
+    guest_docs[user_id] = {}
+    await update.message.reply_text(
+        "Здравствуйте! 👋 Добро пожаловать в *Alekseev Apartments!*\n\n"
+        "Благодарим вас за то что выбрали нас — мы рады каждому гостю! 🏠✨\n\n"
+        "Меня зовут *Алекс* — я ИИ-ассистент Alekseev Apartments.\n"
+        "Я помогу вам с заселением:\n\n"
+        "✅ Приму оплату и проверю документы\n"
+        "🔑 Заселю вас дистанционно через минисейф\n"
+        "💬 Отвечу на все вопросы по размещению\n\n"
+        "Напишите пожалуйста имя на которое оформлена бронь и даты заезда/выезда:\n\n"
+        "_Например: Иванов Иван с 01.01 по 02.01_",
+        parse_mode="Markdown"
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_admin(update.effective_user):
@@ -2412,6 +2434,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
 
 app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("newbook", newbook))
 app.add_handler(CommandHandler("admin", set_admin_id))
 app.add_handler(CommandHandler("maxapt", maxapt_command))
 app.add_handler(CommandHandler("b", set_balance))
@@ -2841,6 +2864,24 @@ def start_max_bot():
 
         text = body.text if body else ""
         if not text:
+            return
+
+        # Команда /newbook — новое бронирование
+        if text.strip().lower() in ["/newbook", "/start"]:
+            max_states[uid] = "asking_name"
+            max_hist[uid] = []
+            max_docs[uid] = {}
+            await event.message.answer(
+                "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
+                "Благодарим вас за то что выбрали нас — мы рады каждому гостю! 🏠✨\n\n"
+                "Меня зовут Алекс — я ИИ-ассистент Alekseev Apartments.\n"
+                "Я помогу вам с заселением:\n\n"
+                "✅ Приму оплату и проверю документы\n"
+                "🔑 Заселю вас дистанционно через минисейф\n"
+                "💬 Отвечу на все вопросы по размещению\n\n"
+                "Напишите пожалуйста имя на которое оформлена бронь и даты заезда/выезда:\n\n"
+                "Например: Иванов Иван с 01.01 по 02.01"
+            )
             return
 
         # Проверяем очередь исходящих сообщений от Telegram администратора
