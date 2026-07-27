@@ -2009,6 +2009,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["date_from"] = date_from
             context.user_data["date_to"] = date_to
             guest_name_to_id[name.lower()] = user_id
+
+            # Уведомляем администратора
+            username = f"@{user.username}" if user.username else f"{user.first_name}"
+            admin_id = get_admin_chat_id()
+            if admin_id:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🆕 Новый гость (Telegram): {username}\n"
+                         f"Имя: {name} | Заезд: {date_from} | Выезд: {date_to}\n"
+                         f"✅ Бронь найдена | Сумма: {total} руб."
+                )
+
             await update.message.reply_text(
                 f"✅ Бронь найдена!\n\n"
                 f"🔑 *Заселение у нас дистанционное* — вы заселяетесь самостоятельно через минисейф. "
