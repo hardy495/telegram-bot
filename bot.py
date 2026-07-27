@@ -2035,6 +2035,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Уведомляем администратора
             username = f"@{user.username}" if user.username else f"{user.first_name}"
             admin_id = get_admin_chat_id()
+            print(f"[TG] Уведомление администратору: admin_id={admin_id}", flush=True)
             if admin_id:
                 await context.bot.send_message(
                     chat_id=admin_id,
@@ -2042,6 +2043,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          f"Имя: {name} | Заезд: {date_from} | Выезд: {date_to}\n"
                          f"✅ Бронь найдена | Сумма: {total} руб."
                 )
+            else:
+                print(f"[TG] admin_id не найден! ADMIN_CHAT_ID={os.getenv('ADMIN_CHAT_ID')}", flush=True)
 
             await update.message.reply_text(
                 f"✅ Бронь найдена!\n\n"
