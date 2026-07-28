@@ -449,14 +449,13 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         }
         return
 
-    # Кнопка "Купить парк/место"
     elif query.data.startswith("parking_"):
         guest_id = int(query.data.split("_")[1])
         guest_username = f"@{query.from_user.username}" if query.from_user.username else f"{query.from_user.first_name}"
 
         admin_id = get_admin_chat_id()
         if admin_id:
-            await context.bot.send_message(
+            msg = await context.bot.send_message(
                 chat_id=admin_id,
                 text=f"🅿️ *Запрос на покупку парковочного места*\n\n"
                      f"Гость: {guest_username}\n"
@@ -465,8 +464,8 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
                      f"Ответьте Reply с реквизитами для оплаты — гость получит автоматически!",
                 parse_mode="Markdown"
             )
-            # Сохраняем для reply
-            notification_to_guest[admin_id] = guest_id
+            # Сохраняем message_id для reply
+            notification_to_guest[msg.message_id] = guest_id
         await query.answer("Запрос отправлен администратору!")
         await query.edit_message_reply_markup(reply_markup=None)
         await context.bot.send_message(
