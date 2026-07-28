@@ -3132,7 +3132,7 @@ def start_max_bot():
             return
 
         # Обработка текстовых команд выезда и продления через ИИ
-        if state in ["verified", "waiting_admin_confirmation", "waiting_docs"] and text:
+        if state == "verified" and text:
             # ИИ определяет намерение
             intent_resp = claude.messages.create(
                 model="claude-sonnet-4-6", max_tokens=10,
@@ -3331,8 +3331,9 @@ def start_max_bot():
                         if isinstance(msg_data, dict):
                             text = msg_data.get("text", "")
                             await mb.send_message(chat_id=cid, text=text)
-                            # Если нужны кнопки выезда — отправляем отдельным сообщением
                             if msg_data.get("with_checkout_buttons"):
+                                # Гость заселён — ставим verified
+                                max_states[uid] = "verified"
                                 await asyncio.sleep(0.5)
                                 await mb.send_message(
                                     chat_id=cid,
