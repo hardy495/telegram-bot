@@ -828,6 +828,16 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             guest_states[uid] = "waiting_docs"
             guest_docs[uid] = {}
+            # Уведомляем администратора что гость найден и уведомлён
+            admin_id = get_admin_chat_id()
+            if admin_id:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🆕 Новый гость (Telegram): ID {uid}\n"
+                         f"Имя: {name} | Заезд: {date_from}\n"
+                         f"✅ Бронь найдена | Сумма: {total_msg} руб.\n"
+                         f"Информация отправлена гостю!"
+                )
             try:
                 await context.bot.send_message(chat_id=uid, text=tg_msg, parse_mode="Markdown")
                 notified = True
@@ -1918,6 +1928,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             amount = balance_data["amount"]
             total = amount + DEPOSIT
             guest_states[user_id] = "waiting_docs"
+            guest_name_to_id[name.lower()] = user_id
+
+            # Уведомляем администратора что бронь найдена
+            username = f"@{user.username}" if user.username else f"{user.first_name}"
+            admin_id = get_admin_chat_id()
+            print(f"[TG] Бронь найдена, уведомляем admin_id={admin_id}", flush=True)
+            if admin_id:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🆕 Новый гость (Telegram): {username}\n"
+                         f"Имя: {name} | Заезд: {date_from} | Выезд: {date_to}\n"
+                         f"✅ Бронь найдена | Сумма: {total} руб."
+                )
+
             await update.message.reply_text(
                 f"✅ Бронь найдена!\n\n"
                 f"🔑 *Заселение у нас дистанционное* — вы заселяетесь самостоятельно через минисейф. "
