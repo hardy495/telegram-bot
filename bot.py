@@ -144,6 +144,7 @@ SYSTEM_PROMPT = """Ты вежливый и профессиональный п�
 • Платная парковка непосредственно с ул. Красная 176 при наличии свободных мест — 60 руб/час по будням с 8:00 до 20:00
 
 Если гость спрашивает про парковку на Красной 176 и интересуется индивидуальным местом — верни ровно: [ПАРКОВКА_КРАСНАЯ]
+Если гость явно хочет купить/приобрести парковочное место (пишет "хочу купить", "хочу приобрести", "как оплатить", "да хочу") — верни ровно: [КУПИТЬ_ПАРКОВКУ]
 
 Для апартамента на ул. Гаражная 107:
 • Можно заехать под шлагбаум на трафике и запарковаться в любом свободном месте во дворе
@@ -3330,15 +3331,7 @@ def start_max_bot():
         elif "[ПОЗДНИЙ_ВЫЕЗД]" in reply:
             await tg_admin(f"🕐 Поздний выезд (MAX) от {un}:\n{text}")
             await event.message.answer("Поздний выезд: 400 руб/час после 12:00.\n\nДо скольки хотите выехать?")
-        elif "[ПАРКОВКА_КРАСНАЯ]" in reply:
-            await event.message.answer(
-                "🚗 Парковка для Красная 176:\n\n"
-                "• Индивидуальное место -1 этаж — 1000 руб/сутки\n"
-                "• Бесплатно — ул. Путевая\n"
-                "• Платная с ул. Красная 176 — 60 руб/час 8-20 будни\n\n"
-                "Если хотите приобрести индивидуальное место — напишите нам и мы пришлём реквизиты для оплаты! 🅿️"
-            )
-            # Уведомляем администратора и сохраняем для reply
+        elif "[КУПИТЬ_ПАРКОВКУ]" in reply:
             tg_tok = os.getenv("TELEGRAM_TOKEN")
             admin_id = get_admin_chat_id()
             if admin_id and tg_tok:
@@ -3347,18 +3340,27 @@ def start_max_bot():
                     async with _hx.AsyncClient() as c:
                         r = await c.post(
                             f"https://api.telegram.org/bot{tg_tok}/sendMessage",
-                            json={
-                                "chat_id": admin_id,
-                                "text": f"🅿️ Запрос на парковочное место (MAX)\n\n"
-                                        f"Гость: {un}\nАпартамент: 182 кв\n\n"
-                                        f"Ответьте Reply с реквизитами для оплаты — гость получит автоматически!"
-                            }
+                            json={"chat_id": admin_id,
+                                  "text": f"🅿️ Запрос на парковочное место (MAX)\n\nГость: {un}\nАпартамент: 182 кв\n\nОтветьте Reply с реквизитами!"}
                         )
                         msg_data = r.json()
                         if msg_data.get("ok"):
                             max_promo_map[msg_data["result"]["message_id"]] = uid
                 except Exception as e:
                     print(f"[MAX] Ошибка парковки: {e}", flush=True)
+            buy_text = "✅ Запрос отправлен администратору!\n\nРеквизиты для оплаты пришлём вам в ближайшее время. ⏱"
+            max_hist[uid].append({"role":"assistant","content":buy_text})
+            await event.message.answer(buy_text)
+        elif "[ПАРКОВКА_КРАСНАЯ]" in reply:
+            parking_text = (
+                "🚗 Варианты парковки:\n\n"
+                "• Индивидуальное место -1 этаж — 1000 руб/сутки\n"
+                "• Бесплатно — ул. Путевая\n"
+                "• Платная с ул. Красная 176 — 60 руб/час 8-20 будни\n\n"
+                "Если хотите приобрести индивидуальное место — напишите нам!"
+            )
+            max_hist[uid].append({"role":"assistant","content":parking_text})
+            await event.message.answer(parking_text)
         else:
             max_hist[uid].append({"role":"assistant","content":reply})
             await event.message.answer(reply)
