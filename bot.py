@@ -755,6 +755,97 @@ async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        return
+    full_text = " ".join(context.args) if context.args else ""
+    if not full_text:
+        await update.message.reply_text("Пример: /b Иванов Иван с 01.07 по 05.07 3500")
+        return
+    from datetime import date as date_cls
+    today_str = date_cls.today().strftime("%d.%m.%Y")
+    parse_response = claude.messages.create(
+        model="claude-sonnet-4-6", max_tokens=150,
+        messages=[{"role": "user", "content":
+            f"Сегодня {today_str}. Из текста извлеки данные бронирования.\n"
+            f"Текст: \"{full_text}\"\n\n"
+            f"ИМЯ: (имя)\nЗАЕЗД: (дата ДД.ММ)\nВЫЕЗД: (дата ДД.ММ)\nСУММА: (только число)\n\n"
+            f"Если написано сегодня={today_str}. Сумма — последнее число."}]
+    )
+    raw = parse_response.content[0].text.strip()
+    name, date_from, date_to, amount = "", "", "", None
+    for line in raw.split("\n"):
+        if line.upper().startswith("ИМЯ:"): name = line.split(":", 1)[-1].strip()
+        elif line.upper().startswith("ЗАЕЗД:"): date_from = line.split(":", 1)[-1].strip()
+        elif line.upper().startswith("ВЫЕЗД:"): date_to = line.split(":", 1)[-1].strip()
+        elif line.upper().startswith("СУММА:"):
+            try: amount = int(line.split(":", 1)[-1].strip().replace(" ", ""))
+            except: pass
+    if not name or amount is None:
+        await update.message.reply_text("Не удалось распознать.\nПример: /b Иванов Иван с 01.07 по 05.07 3500")
+        return
+    total = DEPOSIT if amount == 0 else amount + DEPOSIT
+    key = f"{name.lower()}_{date_from}"
+    guest_balances[key] = {"name": name, "name_lower": name.lower(),
+                           "date_from": date_from, "date_to": date_to, "amount": amount}
+    save_balances_to_file(guest_balances)
+
+    notified = False
+
+    # Ищем гостя в TELEGRAM который ждёт бронь
+    for saved_name, uid in list(guest_name_to_id.items()):
+        saved_words = set(saved_name.lower().split())
+        new_words = set(name.lower().split())
+        if saved_words & new_words and guest_states.get(uid) == "waiting_balance":
+            total_msg = DEPOSIT if amount == 0 else amount + DEPOSIT
+            if amount == 0:
+                tg_msg = (f"✅ Бронь найдена!\n\n🔑 *Заселение у нас дистанционное* — через минисейф.\n\n"
+                          f"Вы уже полностью оплатили! 🎉\n\n📄 Фото паспорта\n"
+                          f"💰 Залог: *{DEPOSIT} руб.*\n\n{PAYMENT_INFO}\n\n"
+                          f"⚠️ При переводе *ничего не пишите* в комментарии.")
+            else:
+                tg_msg = (f"✅ Бронь найдена!\n\n🔑 *Заселение у нас дистанционное* — через минисейф.\n\n"
+                          f"📄 Фото паспорта\n💰 Остаток: *{amount} руб.*\n"
+                          f"💰 Залог: *{DEPOSIT} руб.*\n💰 Итого: *{total_msg} руб.*\n\n"
+                          f"{PAYMENT_INFO}\n\n⚠️ При переводе *ничего не пишите* в комментарии.")
+            guest_states[uid] = "waiting_docs"
+            guest_docs[uid] = {}
+            admin_id = get_admin_chat_id()
+            if admin_id:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🆕 Новый гость (Telegram): ID {uid}\nИмя: {name}\n✅ Бронь найдена | {total_msg} руб."
+                )
+            try:
+                await context.bot.send_message(chat_id=uid, text=tg_msg, parse_mode="Markdown")
+                notified = True
+                await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total_msg} руб. → отправлено гостю в Telegram!")
+                return
+            except Exception as e:
+                print(f"Ошибка отправки TG гостю: {e}")
+
+    # Ищем гостя в MAX который ждёт эту бронь
+    for max_uid, winfo in list(max_waiting.items()):
+        wname = winfo.get("name", "").lower()
+        if set(name.lower().split()) & set(wname.split()):
+            if amount == 0:
+                msg = (f"✅ Бронь найдена!\n\nВы уже полностью оплатили! 🎉\n\n"
+                       f"📄 Фото паспорта\n💰 Залог: {DEPOSIT} руб.\n\n{PAYMENT_INFO}\n\n"
+                       f"⚠️ При переводе ничего не пишите в комментарии.")
+            else:
+                msg = (f"✅ Бронь найдена!\n\n📄 Фото паспорта\n"
+                       f"💰 Остаток: {amount} руб.\n💰 Залог: {DEPOSIT} руб.\n💰 Итого: {total} руб.\n\n"
+                       f"{PAYMENT_INFO}\n\n⚠️ При переводе ничего не пишите в комментарии.")
+            max_states[max_uid] = "waiting_docs"
+            max_docs[max_uid] = {}
+            max_outbox[max_uid] = msg
+            del max_waiting[max_uid]
+            await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → гость уведомлён в MAX!")
+            return
+
+    await update.message.reply_text(f"✅ {name} | {date_from}–{date_to} | {total} руб. → сохранено")
+
+
 async def set_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /setcode КВ НОВЫЙ_КОД — изменить пароль минисейфа"""
     if not is_admin(update.effective_user):
