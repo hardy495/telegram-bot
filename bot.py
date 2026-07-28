@@ -755,7 +755,65 @@ async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def set_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /setcode КВ НОВЫЙ_КОД — изменить пароль минисейфа"""
+    if not is_admin(update.effective_user):
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Использование: `/setcode КВ КОД`\n\n"
+            "Примеры:\n"
+            "`/setcode 182 5050`\n"
+            "`/setcode 159 1234`\n"
+            "`/setcode 243 0000`\n\n"
+            "Доступные квартиры: 182, 159, 243, 86, 2, 49, 7",
+            parse_mode="Markdown"
+        )
+        return
+
+    apt_num = context.args[0].strip()
+    new_code = context.args[1].strip()
+
+    if not new_code.isdigit() or len(new_code) != 4:
+        await update.message.reply_text("❌ Код должен состоять из 4 цифр.\nПример: `/setcode 182 5050`", parse_mode="Markdown")
+        return
+
+    # Ищем апартамент
+    memory = load_memory()
+    objects = memory.get("objects", {})
+    apt_key = f"{apt_num} кв"
+
+    if apt_key not in objects:
+        available = ", ".join(objects.keys())
+        await update.message.reply_text(f"❌ Апартамент не найден.\n\nДоступные: {available}")
+        return
+
+    # Заменяем старый 4-значный код на новый
+    import re
+    old_info = objects[apt_key]
+
+    # Ищем текущий код минисейфа в тексте
+    codes = re.findall(r'\b\d{4}\b', old_info)
+    # Исключаем WiFi пароли и другие числа — берём тот что идёт после "Минисейф" или "код"
+    minisafe_match = re.search(r'((?:Минисейф|код)[^0-9]*?)(\d{4})', old_info, re.IGNORECASE)
+
+    if minisafe_match:
+        old_code = minisafe_match.group(2)
+        new_info = old_info.replace(f"<b>{old_code}</b>", f"<b>{new_code}</b>", 1)
+        if new_info == old_info:
+            new_info = old_info.replace(old_code, new_code, 1)
+        memory["objects"][apt_key] = new_info
+        save_memory(memory)
+        await update.message.reply_text(
+            f"✅ Пароль минисейфа *{apt_key}* обновлён!\n\n"
+            f"Старый: `{old_code}`\n"
+            f"Новый: `{new_code}`",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(f"❌ Не удалось найти код минисейфа в {apt_key}. Проверьте базу через /list")
+
+
     if not is_admin(update.effective_user):
         return
     full_text = " ".join(context.args) if context.args else ""
@@ -1768,20 +1826,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("Пожалуйста ответьте *ДА* или *НЕТ*", parse_mode="Markdown")
                 return
 
-            # Проверяем промокод для MAX гостя
+            # Проверяем reply для MAX гостя (промокод или реквизиты для парковки)
             if reply_to.message_id in max_promo_map:
                 max_uid = max_promo_map[reply_to.message_id]
-                max_cid = max_chat_ids.get(max_uid, max_uid)
-                max_outbox[max_uid] = {
-                    "text": f"🎁 Ваш персональный промокод:\n\n{user_text}\n\n"
-                           f"Чтобы забронировать со скидкой — позвоните:\n"
-                           f"📞 +7 918 148 00 45\n\n"
-                           f"Назовите оператору ваш промокод и получите скидку!\n\n"
-                           f"Будем рады видеть вас снова в Alekseev Apartments! 🏠✨"
-                }
-                max_states[max_uid] = "checkout_done_max"
+                max_state = max_states.get(max_uid)
+
+                if max_state == "waiting_promo_max":
+                    # Это промокод
+                    max_outbox[max_uid] = {
+                        "text": f"🎁 Ваш персональный промокод:\n\n{user_text}\n\n"
+                               f"Чтобы забронировать со скидкой — позвоните:\n"
+                               f"📞 +7 918 148 00 45\n\n"
+                               f"Назовите оператору ваш промокод и получите скидку!\n\n"
+                               f"Будем рады видеть вас снова в Alekseev Apartments! 🏠✨"
+                    }
+                    max_states[max_uid] = "checkout_done_max"
+                else:
+                    # Реквизиты для парковки или другой ответ
+                    max_outbox[max_uid] = {"text": f"💳 Реквизиты для оплаты парковки:\n\n{user_text}"}
+
                 del max_promo_map[reply_to.message_id]
-                await update.message.reply_text("✅ Промокод отправлен гостю в MAX!")
+                await update.message.reply_text("✅ Ответ отправлен гостю в MAX!")
                 return
 
             if reply_to.message_id in notification_to_guest:
@@ -2464,6 +2529,7 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("newbook", newbook))
 app.add_handler(CommandHandler("admin", set_admin_id))
 app.add_handler(CommandHandler("maxapt", maxapt_command))
+app.add_handler(CommandHandler("setcode", set_code))
 app.add_handler(CommandHandler("b", set_balance))
 app.add_handler(CommandHandler("remember", remember))
 app.add_handler(CommandHandler("add", add_object))
@@ -3130,8 +3196,29 @@ def start_max_bot():
                 "• Индивидуальное место -1 этаж — 1000 руб/сутки\n"
                 "• Бесплатно — ул. Путевая\n"
                 "• Платная с ул. Красная 176 — 60 руб/час 8-20 будни\n\n"
-                "Для покупки места: 📞 +7 918 148 00 45"
+                "Если хотите приобрести индивидуальное место — напишите нам и мы пришлём реквизиты для оплаты! 🅿️"
             )
+            # Уведомляем администратора и сохраняем для reply
+            tg_tok = os.getenv("TELEGRAM_TOKEN")
+            admin_id = get_admin_chat_id()
+            if admin_id and tg_tok:
+                try:
+                    import httpx as _hx
+                    async with _hx.AsyncClient() as c:
+                        r = await c.post(
+                            f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={
+                                "chat_id": admin_id,
+                                "text": f"🅿️ Запрос на парковочное место (MAX)\n\n"
+                                        f"Гость: {un}\nАпартамент: 182 кв\n\n"
+                                        f"Ответьте Reply с реквизитами для оплаты — гость получит автоматически!"
+                            }
+                        )
+                        msg_data = r.json()
+                        if msg_data.get("ok"):
+                            max_promo_map[msg_data["result"]["message_id"]] = uid
+                except Exception as e:
+                    print(f"[MAX] Ошибка парковки: {e}", flush=True)
         else:
             max_hist[uid].append({"role":"assistant","content":reply})
             await event.message.answer(reply)
