@@ -835,9 +835,16 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"📄 Фото паспорта\n💰 Залог: {DEPOSIT} руб.\n\n{PAYMENT_INFO}\n\n"
                        f"⚠️ При переводе ничего не пишите в комментарии.")
             else:
-                msg = (f"✅ Бронь найдена!\n\n📄 Фото паспорта\n"
-                       f"💰 Остаток: {amount} руб.\n💰 Залог: {DEPOSIT} руб.\n💰 Итого: {total} руб.\n\n"
-                       f"{PAYMENT_INFO}\n\n⚠️ При переводе ничего не пишите в комментарии.")
+                msg = (f"✅ Бронь найдена!\n\n"
+                       f"🔑 *Заселение у нас дистанционное* — вы заселяетесь самостоятельно через минисейф. Все инструкции, пароли и адрес придут после подтверждения оплаты.\n\n"
+                       f"Для оформления нам потребуется:\n\n"
+                       f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
+                       f"💰 Чек об оплате по реквизитам:\n"
+                       f"• Остаток по бронированию: {amount} руб.\n"
+                       f"• Залог: {DEPOSIT} руб. (возвращается в день выезда до конца дня)\n"
+                       f"• Итого: {total} руб.\n\n"
+                       f"{PAYMENT_INFO}\n\n"
+                       f"⚠️ При переводе ничего не пишите в комментарии к платежу.")
             max_states[max_uid] = "waiting_docs"
             max_docs[max_uid] = {}
             max_outbox[max_uid] = msg
@@ -2773,40 +2780,50 @@ def start_max_bot():
         import base64
         img_b64 = base64.standard_b64encode(img_bytes).decode()
         if check_type == "passport":
-            prompt = "Это паспорт гражданина? Ответь только ДА или НЕТ."
+            prompt = "Это паспорт или документ удостоверяющий личность? Ответь ТОЛЬКО: ДА или НЕТ"
+            prefill = ""
         else:
             if expected_amount:
-                prompt = (f"Это чек об оплате или банковское подтверждение перевода? "
-                         f"Если да — найди сумму перевода. Ожидаемая сумма: {expected_amount} руб.\n"
-                         f"Ответь в формате: ЧЕК:ДА:СУММА или ЧЕК:НЕТ или НЕ_ЧЕК")
+                prompt = (f"Это банковский чек или квитанция о переводе денег?\n"
+                         f"Ожидаемая сумма: {expected_amount} руб.\n"
+                         f"Ответь СТРОГО одной строкой:\n"
+                         f"ЧЕК:ДА:{expected_amount} если чек и сумма совпадает\n"
+                         f"ЧЕК:ДА:СУММА если чек другая сумма\n"
+                         f"НЕ_ЧЕК если не чек")
+                prefill = "ЧЕК:"
             else:
-                prompt = "Это чек об оплате или банковское подтверждение перевода? Ответь только ДА или НЕТ."
-        r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=30,
-            messages=[{"role":"user","content":[
-                {"type":"image","source":{"type":"base64","media_type": media_type,"data":img_b64}},
-                {"type":"text","text":prompt}
-            ]}])
-        result = r.content[0].text.strip().upper()
+                prompt = "Это банковский чек о переводе? Ответь: ЧЕК:ДА или НЕ_ЧЕК"
+                prefill = ""
+
+        messages = [{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","media_type": media_type,"data":img_b64}},
+            {"type":"text","text":prompt}
+        ]}]
+
+        # Добавляем prefill для чека чтобы принудить нужный формат
+        if prefill:
+            messages.append({"role": "assistant", "content": prefill})
+
+        r = claude.messages.create(model="claude-sonnet-4-6", max_tokens=15,
+            messages=messages)
+        result = (prefill + r.content[0].text).strip().upper().split('\n')[0]
         print(f"[MAX] ИИ ответ ({check_type}): {result}", flush=True)
 
         if check_type == "passport":
             return result.startswith("ДА"), None
 
-        # Для чека
-        if expected_amount and "ЧЕК:ДА:" in result:
-            # Извлекаем сумму
+        if "ЧЕК:ДА" in result:
             try:
-                found_amount = int(''.join(filter(str.isdigit, result.split("ЧЕК:ДА:")[-1])))
-                if found_amount == expected_amount:
-                    return True, found_amount
-                else:
-                    return True, -found_amount  # отрицательное = не совпала сумма
+                parts = result.split(":")
+                if len(parts) >= 3:
+                    found = int(''.join(filter(str.isdigit, parts[2])))
+                    if expected_amount and found != expected_amount:
+                        return True, -found
+                    return True, found
             except:
-                return True, None
-        elif "ЧЕК:ДА" in result or result.startswith("ДА"):
+                pass
             return True, None
-        else:
-            return False, None
+        return False, None
 
     async def finalize_max_docs(uid, un):
         max_states[uid] = "waiting_admin_confirmation"
@@ -2838,25 +2855,31 @@ def start_max_bot():
 
     @md.bot_started()
     async def ms(event: BS):
-        uid = event.message.sender.user_id
-        # Сохраняем chat_id для отправки сообщений
-        chat_id = getattr(event.message, 'recipient', None)
-        chat_id = getattr(chat_id, 'chat_id', None) or uid
-        max_states[uid] = "asking_name"
-        max_hist[uid] = []
-        max_docs[uid] = {}
-        max_chat_ids[uid] = chat_id  # сохраняем chat_id
-        await event.message.answer(
-            "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
-            "Благодарим вас за то что выбрали нас — мы рады каждому гостю! 🏠✨\n\n"
-            "Меня зовут Алекс — я ИИ-ассистент Alekseev Apartments.\n"
-            "Я помогу вам с заселением:\n\n"
-            "✅ Приму оплату и проверю документы\n"
-            "🔑 Заселю вас дистанционно через минисейф\n"
-            "💬 Отвечу на все вопросы по размещению\n\n"
-            "Напишите пожалуйста имя на которое оформлена бронь и даты заезда/выезда:\n\n"
-            "Например: Иванов Иван с 01.01 по 02.01"
-        )
+        try:
+            uid = event.user_id if hasattr(event, 'user_id') else event.message.sender.user_id
+            chat_id = event.chat_id if hasattr(event, 'chat_id') else uid
+            max_states[uid] = "asking_name"
+            max_hist[uid] = []
+            max_docs[uid] = {}
+            max_chat_ids[uid] = chat_id
+
+            welcome = (
+                "Здравствуйте! 👋 Добро пожаловать в Alekseev Apartments!\n\n"
+                "Благодарим вас за то что выбрали нас — мы рады каждому гостю! 🏠✨\n\n"
+                "Меня зовут Алекс — я ИИ-ассистент Alekseev Apartments.\n"
+                "Я помогу вам с заселением:\n\n"
+                "✅ Приму оплату и проверю документы\n"
+                "🔑 Заселю вас дистанционно через минисейф\n"
+                "💬 Отвечу на все вопросы по размещению\n\n"
+                "Напишите пожалуйста имя на которое оформлена бронь и даты заезда/выезда:\n\n"
+                "Например: Иванов Иван с 01.01 по 02.01"
+            )
+            if hasattr(event, 'message') and event.message:
+                await event.message.answer(welcome)
+            else:
+                await mb.send_message(chat_id=chat_id, text=welcome)
+        except Exception as e:
+            print(f"[MAX] bot_started error: {e}", flush=True)
 
     @md.message_created()
     async def mm(event: MC):
@@ -3106,19 +3129,30 @@ def start_max_bot():
             await tg_admin(f"🆕 Новый гость (MAX): {un}\n{name} | {dfrom}\n✅ Бронь найдена")
             if amt == 0:
                 await event.message.answer(
-                    f"✅ Бронь найдена!\n\nВы уже полностью оплатили! 🎉\n\n"
-                    f"Заселение дистанционное — через минисейф.\n\n"
-                    f"Для оформления:\n📄 Фото паспорта (лицевая сторона)\n"
-                    f"💰 Залог: {DEPOSIT} руб. (возвращается в день выезда)\n\n"
-                    f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии."
+                    f"✅ Бронь найдена!\n\n"
+                    f"🔑 Заселение у нас дистанционное — вы заселяетесь самостоятельно через минисейф.\n"
+                    f"Все инструкции, пароли и адрес придут после подтверждения документов.\n\n"
+                    f"Вы уже полностью оплатили бронирование! 🎉\n\n"
+                    f"Для оформления нам потребуется:\n\n"
+                    f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
+                    f"💰 Залог: {DEPOSIT} руб.\n"
+                    f"_(возвращается в день выезда до конца дня при отсутствии повреждений)_\n\n"
+                    f"{PAYMENT_INFO}\n\n"
+                    f"⚠️ При переводе ничего не пишите в комментарии к платежу."
                 )
             else:
                 await event.message.answer(
-                    f"✅ Бронь найдена!\n\nЗаселение дистанционное — через минисейф.\n\n"
-                    f"Для оформления:\n📄 Фото паспорта (лицевая сторона)\n\n"
-                    f"💰 Оплата по реквизитам:\n"
-                    f"• Остаток: {amt} руб.\n• Залог: {DEPOSIT} руб.\n• Итого: {total} руб.\n\n"
-                    f"{PAYMENT_INFO}\n\nПри переводе ничего не пишите в комментарии."
+                    f"✅ Бронь найдена!\n\n"
+                    f"🔑 Заселение у нас дистанционное — вы заселяетесь самостоятельно через минисейф.\n"
+                    f"Все инструкции, пароли и адрес придут после подтверждения оплаты.\n\n"
+                    f"Для оформления нам потребуется:\n\n"
+                    f"📄 Фото паспорта на чьё имя оформлена бронь (лицевая сторона)\n\n"
+                    f"💰 Чек об оплате по реквизитам:\n\n"
+                    f"• Остаток по бронированию: {amt} руб.\n"
+                    f"• Залог: {DEPOSIT} руб. _(возвращается в день выезда до конца дня)_\n"
+                    f"• Итого: {total} руб.\n\n"
+                    f"{PAYMENT_INFO}\n\n"
+                    f"⚠️ При переводе ничего не пишите в комментарии к платежу."
                 )
             return
 
