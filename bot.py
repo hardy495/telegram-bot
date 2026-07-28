@@ -449,20 +449,24 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         }
         return
 
-
+    # Кнопка "Купить парк/место"
+    elif query.data.startswith("parking_"):
         guest_id = int(query.data.split("_")[1])
-        username_obj = query.from_user
-        guest_username = f"@{username_obj.username}" if username_obj.username else f"{username_obj.first_name}"
+        guest_username = f"@{query.from_user.username}" if query.from_user.username else f"{query.from_user.first_name}"
 
-        if get_admin_chat_id():
+        admin_id = get_admin_chat_id()
+        if admin_id:
             await context.bot.send_message(
-                chat_id=get_admin_chat_id(),
+                chat_id=admin_id,
                 text=f"🅿️ *Запрос на покупку парковочного места*\n\n"
                      f"Гость: {guest_username}\n"
                      f"Апартамент: Красная 176\n\n"
-                     f"Гость хочет приобрести индивидуальное парковочное место (1000 руб/сутки).",
+                     f"Гость хочет приобрести индивидуальное место (1000 руб/сутки).\n\n"
+                     f"Ответьте Reply с реквизитами для оплаты — гость получит автоматически!",
                 parse_mode="Markdown"
             )
+            # Сохраняем для reply
+            notification_to_guest[admin_id] = guest_id
         await query.answer("Запрос отправлен администратору!")
         await query.edit_message_reply_markup(reply_markup=None)
         await context.bot.send_message(
@@ -470,6 +474,7 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
             text="✅ Запрос на парковочное место отправлен!\n\n"
                  "Администратор свяжется с вами в течение 10 минут. ⏱"
         )
+        return
 
 
     # Кнопка "Это паспорт" для PDF
@@ -716,12 +721,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Привет! Вы вошли как администратор 👋\n\n"
             "Команды:\n"
             "/admin — активировать уведомления\n"
-            "/b ФИО сумма — установить остаток по бронированию\n"
-            "/remember текст — запомнить информацию\n"
-            "/add название | инфо — добавить апартамент\n"
-            "/list — база знаний\n"
-            "/delnote номер — удалить заметку\n"
-            "/delobj название — удалить апартамент\n\n"
+            "/b ФИО с ДД.ММ по ДД.ММ СУММА — добавить бронь\n"
+            "/setcode КВ КОД — сменить пароль минисейфа\n"
+            "/add название | инфо — добавить/обновить апартамент\n"
+            "/remember текст — запомнить заметку\n\n"
             "💡 На вопросы гостей отвечайте через *Reply*.",
             parse_mode="Markdown"
         )
@@ -1973,14 +1976,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
         await update.message.reply_text(
-            "Команды:\n"
+            "Команды администратора:\n"
             "/admin — активировать уведомления\n"
-            "/b ФИО сумма — установить остаток по брони\n"
-            "/remember текст — запомнить информацию\n"
-            "/add название | инфо — добавить апартамент\n"
-            "/list — база знаний\n"
-            "/delnote номер — удалить заметку\n"
-            "/delobj название — удалить апартамент"
+            "/b ФИО с ДД.ММ по ДД.ММ СУММА — добавить бронь\n"
+            "/setcode КВ КОД — сменить пароль минисейфа\n"
+            "/add название | инфо — добавить/обновить апартамент\n"
+            "/remember текст — запомнить заметку"
         )
         return
 
