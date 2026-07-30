@@ -627,7 +627,7 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         guest_states[guest_id] = "verified"
         context.bot_data.setdefault("guest_apt", {})[guest_id] = apt_name
         conversation_history[guest_id] = []
-        await query.edit_message_text(f"✅ Информация по апартаменту отправлена гостю!")
+        await query.edit_message_text(f"✅ Информация по апартаменту *{apt_name}* отправлена гостю!", parse_mode="Markdown")
         del pending_guest[admin_chat_id]
 
     # Кнопка "Мы выехали"
@@ -2376,26 +2376,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if state == "waiting_requisites":
-        apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
+        # Пробуем получить апартамент из разных источников
+        apt_name = (context.bot_data.get("guest_apt", {}).get(user_id) or
+                    context.bot_data.get("guest_apt", {}).get(str(user_id)) or
+                    "неизвестный апартамент")
         username = f"@{user.username}" if user.username else f"{user.first_name}"
+        print(f"[TG] waiting_requisites: user={user_id}, apt={apt_name}, text={user_text[:30]}", flush=True)
 
-        # ИИ определяет — это реквизиты или отзыв/что-то другое
+        # ИИ определяет — это реквизиты или нет
         check = claude.messages.create(
             model="claude-sonnet-4-6", max_tokens=10,
             messages=[{"role": "user", "content":
                 f"Это реквизиты для перевода денег (содержит номер телефона, банк или ФИО)? "
                 f"Текст: \"{user_text}\"\nОтветь только: РЕКВИЗИТЫ или НЕТ"}]
         ).content[0].text.strip().upper()
+        print(f"[TG] ИИ check requisites: {check}", flush=True)
 
         if "РЕКВИЗИТЫ" in check:
-            if get_admin_chat_id():
+            admin_id = get_admin_chat_id()
+            if admin_id:
                 await context.bot.send_message(
-                    chat_id=get_admin_chat_id(),
-                    text=f"💳 *Реквизиты для возврата залога*\n\n"
-                         f"Апартамент: *{apt_name}*\n"
+                    chat_id=admin_id,
+                    text=f"💳 Реквизиты для возврата залога\n\n"
+                         f"Апартамент: {apt_name}\n"
                          f"Гость: {username}\n\n"
-                         f"Реквизиты:\n{user_text}",
-                    parse_mode="Markdown"
+                         f"Реквизиты:\n{user_text}"
                 )
             await update.message.reply_text(
                 "Благодарим вас за реквизиты! ✅\n\n"
@@ -2406,7 +2411,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             guest_states[user_id] = "waiting_feedback"
         else:
-            # Гость написал что-то другое — напоминаем про реквизиты
             await update.message.reply_text(
                 "Для возврата залога пришлите пожалуйста ваши реквизиты:\n\n"
                 "_Номер телефона / Банк / ФИО получателя_\n\n"
