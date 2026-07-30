@@ -1951,18 +1951,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 max_state = max_states.get(max_uid)
 
                 if max_state == "waiting_promo_max":
-                    # Это промокод
+                    # Промокод
                     max_outbox[max_uid] = {
                         "text": f"🎁 Ваш персональный промокод:\n\n{user_text}\n\n"
                                f"Чтобы забронировать со скидкой — позвоните:\n"
                                f"📞 +7 918 148 00 45\n\n"
-                               f"Назовите оператору ваш промокод и получите скидку!\n\n"
+                               f"Назовите оператору ваш промокод!\n\n"
                                f"Будем рады видеть вас снова в Alekseev Apartments! 🏠✨"
                     }
                     max_states[max_uid] = "checkout_done_max"
                 else:
-                    # Реквизиты для парковки или другой ответ
-                    max_outbox[max_uid] = {"text": f"💳 Реквизиты для оплаты парковки:\n\n{user_text}"}
+                    # Ответ оператора (реквизиты, подтверждение продления и т.д.)
+                    max_outbox[max_uid] = {"text": f"💬 Ответ оператора:\n\n{user_text}"}
 
                 del max_promo_map[reply_to.message_id]
                 await update.message.reply_text("✅ Ответ отправлен гостю в MAX!")
@@ -3190,12 +3190,78 @@ def start_max_bot():
             await event.message.answer("Пришлите:\n📄 Фото паспорта\n🧾 Чек об оплате\n\nМожно в любом порядке!")
             return
 
+        if state == "waiting_new_booking_dates_max":
+            apt_name = max_apt.get(uid, "неизвестный апартамент")
+            tg_tok = os.getenv("TELEGRAM_TOKEN")
+            admin_id = get_admin_chat_id()
+            if admin_id and tg_tok:
+                try:
+                    import httpx as _hx
+                    async with _hx.AsyncClient() as c:
+                        r = await c.post(
+                            f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={
+                                "chat_id": admin_id,
+                                "text": f"🔄 Запрос на продление/новую бронь (MAX)\n\n"
+                                        f"Гость: {un}\nАпартамент: {apt_name}\n\n"
+                                        f"Даты: {text}\n\n"
+                                        f"Ответьте Reply — гость получит автоматически!"
+                            }
+                        )
+                        msg_data = r.json()
+                        if msg_data.get("ok"):
+                            max_promo_map[msg_data["result"]["message_id"]] = uid
+                except Exception as e:
+                    print(f"[MAX] Ошибка продления: {e}", flush=True)
+            max_states[uid] = "verified"
+            await event.message.answer(
+                "✅ Запрос на продление отправлен администратору!\n\n"
+                "Ожидайте ответа — вам придёт сообщение в ближайшее время.\n\n"
+                "Также можете позвонить: 📞 +7 918 148 00 45 (10:00–22:00)\n\n"
+                "Если есть другие вопросы — задавайте, я готов помочь! 😊"
+            )
+            return
+
         if state == "waiting_admin_confirmation":
             await event.message.answer("⏱ Документы на проверке.\nОбычно до 15 минут. Как только проверим — придёт вся информация по заселению! 🏠")
             return
 
         # Обработка текстовых команд выезда и продления через ИИ
+        # Обработка текстовых команд выезда и продления через ИИ
         if state == "verified" and text:
+            apt_name = max_apt.get(uid, "неизвестный апартамент")
+            tg_tok = os.getenv("TELEGRAM_TOKEN")
+            admin_id = get_admin_chat_id()
+            if admin_id and tg_tok:
+                try:
+                    import httpx as _hx
+                    async with _hx.AsyncClient() as c:
+                        r = await c.post(
+                            f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={
+                                "chat_id": admin_id,
+                                "text": f"🔄 Запрос на продление/новую бронь (MAX)\n\n"
+                                        f"Гость: {un}\nАпартамент: {apt_name}\n\n"
+                                        f"Даты: {text}\n\n"
+                                        f"Ответьте Reply с реквизитами или подтверждением — гость получит автоматически!"
+                            }
+                        )
+                        msg_data = r.json()
+                        if msg_data.get("ok"):
+                            max_promo_map[msg_data["result"]["message_id"]] = uid
+                except Exception as e:
+                    print(f"[MAX] Ошибка продления: {e}", flush=True)
+            max_states[uid] = "verified"
+            await event.message.answer(
+                "✅ Запрос на продление отправлен администратору!\n\n"
+                "Ожидайте ответа — вам придёт сообщение в ближайшее время.\n\n"
+                "Также вы можете позвонить на горячую линию:\n"
+                "📞 +7 918 148 00 45 (10:00–22:00)\n\n"
+                "Если есть другие вопросы — задавайте, я готов помочь! 😊"
+            )
+            return
+
+
             # ИИ определяет намерение
             intent_resp = claude.messages.create(
                 model="claude-sonnet-4-6", max_tokens=10,
