@@ -3265,23 +3265,12 @@ def start_max_bot():
             await event.message.answer("Пришлите пожалуйста скриншот вашего отзыва 📸")
             return
 
-        if state == "waiting_requisites":
-            await tg_admin(f"💳 Реквизиты (MAX)\nАпартамент: {max_apt.get(uid, '?')}\nГость: {un}\n\n{text}")
-            await event.message.answer("Благодарим за реквизиты! ✅\n\nЗалог вернём сегодня до 00:00.\n\nОставьте пожалуйста обратную связь! 😊")
-            max_states[uid] = "waiting_feedback"
-            return
-
-        if state == "waiting_feedback":
-            await tg_admin(f"⭐ Отзыв (MAX)\nАпартамент: {max_apt.get(uid, '?')}\nГость: {un}\n\n{text}")
-            await event.message.answer("Спасибо за отзыв! 🙏\n\nБудем рады видеть вас снова! 🏠")
-            max_states[uid] = "checkout_done"
-            return
-
         if state == "checkout_done":
             await event.message.answer("Рады слышать вас! 😊\n\nДля новой брони:\n📞 +7 918 148 00 45")
             return
 
         # Claude отвечает
+        print(f"[MAX] Claude вызывается для uid={uid}, state={state}", flush=True)
         if uid not in max_hist: max_hist[uid] = []
         max_hist[uid].append({"role":"user","content":text})
         if len(max_hist[uid]) > 20: max_hist[uid] = max_hist[uid][-20:]
