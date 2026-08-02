@@ -2250,6 +2250,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guest_states[user_id] = "verified"
         return
 
+    if state == "waiting_requisites_negative":
+        apt_name = (context.bot_data.get("guest_apt", {}).get(user_id) or
+                    context.bot_data.get("guest_apt", {}).get(str(user_id)) or
+                    "апартамент")
+        username = f"@{user.username}" if user.username else f"{user.first_name}"
+        check = claude.messages.create(
+            model="claude-sonnet-4-6", max_tokens=10,
+            messages=[{"role": "user", "content":
+                f"Это реквизиты для перевода (номер телефона, банк или ФИО)? "
+                f"Текст: \"{user_text}\"\nОтветь: РЕКВИЗИТЫ или НЕТ"}]
+        ).content[0].text.strip().upper()
+        if "РЕКВИЗИТЫ" in check:
+            admin_id = get_admin_chat_id()
+            if admin_id:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"💳 Реквизиты для возврата залога\n\nАпартамент: {apt_name}\nГость: {username}\n\nРеквизиты:\n{user_text}"
+                )
+            await update.message.reply_text(
+                "Благодарим за реквизиты! ✅\n\n"
+                "Залог вернём сегодня до 00:00.\n\n"
+                "Мы обязательно свяжемся с вами в ближайшее время чтобы выяснить что произошло и дать обратную связь. 🙏"
+            )
+            guest_states[user_id] = "checkout_done"
+        else:
+            await update.message.reply_text(
+                "Для возврата залога пришлите реквизиты:\n\n"
+                "_Номер телефона / Банк / ФИО получателя_",
+                parse_mode="Markdown"
+            )
+        return
+
     if state == "waiting_requisites":
         # Пробуем получить апартамент из разных источников
         apt_name = (context.bot_data.get("guest_apt", {}).get(user_id) or
@@ -2333,10 +2365,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
         else:
-            guest_states[user_id] = "waiting_requisites"
+            guest_states[user_id] = "waiting_requisites_negative"
             await update.message.reply_text(
                 "Нам очень жаль что что-то пошло не так. 😔\n\n"
-                "Мы обязательно свяжемся с вами чтобы разобраться в ситуации!\n\n"
+                "Мы обязательно свяжемся с вами в ближайшее время чтобы выяснить что произошло и дать обратную связь.\n\n"
                 "Для возврата залога пришлите пожалуйста ваши реквизиты:\n\n"
                 "_Номер телефона / Банк / ФИО получателя_\n\n"
                 "_Например: +79001234567 / Сбербанк / Иванов Иван Иванович_",
@@ -3206,6 +3238,17 @@ def start_max_bot():
                 return
             # ДРУГОЕ — пускаем в Claude ниже
 
+        if state == "waiting_requisites_negative":
+            apt_name = max_apt.get(uid, "неизвестный апартамент")
+            await tg_admin(f"💳 Реквизиты (MAX)\nАпартамент: {apt_name}\nГость: {un}\n\n{text}")
+            await event.message.answer(
+                "Благодарим за реквизиты! ✅\n\n"
+                "Залог вернём сегодня до 00:00.\n\n"
+                "Мы обязательно свяжемся с вами в ближайшее время чтобы выяснить что произошло и дать обратную связь. 🙏"
+            )
+            max_states[uid] = "checkout_done_max"
+            return
+
         if state == "waiting_requisites":
             apt_name = max_apt.get(uid, "неизвестный апартамент")
             await tg_admin(f"💳 Реквизиты (MAX)\nАпартамент: {apt_name}\nГость: {un}\n\nРеквизиты:\n{text}")
@@ -3247,10 +3290,10 @@ def start_max_bot():
                     "Например: +79001234567 / Сбербанк / Иванов Иван Иванович"
                 )
             else:
-                max_states[uid] = "waiting_requisites"
+                max_states[uid] = "waiting_requisites_negative"
                 await event.message.answer(
                     "Нам очень жаль что что-то пошло не так. 😔\n\n"
-                    "Мы обязательно свяжемся с вами!\n\n"
+                    "Мы обязательно свяжемся с вами в ближайшее время чтобы выяснить что произошло и дать обратную связь.\n\n"
                     "Для возврата залога пришлите пожалуйста ваши реквизиты:\n\n"
                     "Номер телефона / Банк / ФИО получателя\n\n"
                     "Например: +79001234567 / Сбербанк / Иванов Иван Иванович"
