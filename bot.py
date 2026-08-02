@@ -3221,6 +3221,28 @@ def start_max_bot():
             )
             return
 
+        if state == "waiting_early_time_max":
+            apt_name = max_apt.get(uid, "апартамент")
+            await tg_admin(f"🕐 Ранний заезд (MAX)\nГость: {un}\nАпартамент: {apt_name}\nВремя: {text}")
+            max_states[uid] = "verified"
+            await event.message.answer(
+                "✅ Хорошо, передали информацию администратору!\n\n"
+                "Оператор свяжется с вами в ближайшее время и подтвердит возможность раннего заезда. ⏱\n\n"
+                "Если есть другие вопросы — готов помочь! 😊"
+            )
+            return
+
+        if state == "waiting_late_time_max":
+            apt_name = max_apt.get(uid, "апартамент")
+            await tg_admin(f"🕐 Поздний выезд (MAX)\nГость: {un}\nАпартамент: {apt_name}\nВремя: {text}")
+            max_states[uid] = "verified"
+            await event.message.answer(
+                "✅ Хорошо, передали информацию администратору!\n\n"
+                "Оператор свяжется с вами в ближайшее время и подтвердит возможность позднего выезда. ⏱\n\n"
+                "Если есть другие вопросы — готов помочь! 😊"
+            )
+            return
+
         if state == "waiting_admin_confirmation":
             await event.message.answer("⏱ Документы на проверке.\nОбычно до 15 минут. Как только проверим — придёт вся информация по заселению! 🏠")
             return
@@ -3378,10 +3400,16 @@ def start_max_bot():
             await event.message.answer("Для продления:\n\n1️⃣ Напишите даты — мы уточним\n2️⃣ Или: 📞 +7 918 148 00 45")
         elif "[РАННИЙ_ЗАЕЗД]" in reply:
             await tg_admin(f"🕐 Ранний заезд (MAX) от {un}:\n{text}")
-            await event.message.answer("Ранний заезд: 400 руб/час до 14:00.\n\nСо скольки хотите заехать?")
+            early_text = "Ранний заезд: 400 руб/час до 14:00.\n\nСо скольки хотите заехать?"
+            max_hist[uid].append({"role":"assistant","content":early_text})
+            max_states[uid] = "waiting_early_time_max"
+            await event.message.answer(early_text)
         elif "[ПОЗДНИЙ_ВЫЕЗД]" in reply:
             await tg_admin(f"🕐 Поздний выезд (MAX) от {un}:\n{text}")
-            await event.message.answer("Поздний выезд: 400 руб/час после 12:00.\n\nДо скольки хотите выехать?")
+            late_text = "Поздний выезд: 400 руб/час после 12:00.\n\nДо скольки хотите выехать?"
+            max_hist[uid].append({"role":"assistant","content":late_text})
+            max_states[uid] = "waiting_late_time_max"
+            await event.message.answer(late_text)
         elif "[КУПИТЬ_ПАРКОВКУ]" in reply:
             tg_tok = os.getenv("TELEGRAM_TOKEN")
             admin_id = get_admin_chat_id()
