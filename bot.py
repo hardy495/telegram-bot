@@ -3223,22 +3223,62 @@ def start_max_bot():
 
         if state == "waiting_early_time_max":
             apt_name = max_apt.get(uid, "апартамент")
-            await tg_admin(f"🕐 Ранний заезд (MAX)\nГость: {un}\nАпартамент: {apt_name}\nВремя: {text}")
+            tg_tok = os.getenv("TELEGRAM_TOKEN")
+            admin_id = get_admin_chat_id()
+            if admin_id and tg_tok:
+                try:
+                    import httpx as _hx
+                    async with _hx.AsyncClient() as c:
+                        r = await c.post(
+                            f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={
+                                "chat_id": admin_id,
+                                "text": f"🕐 Ранний заезд (MAX)\n\n"
+                                        f"Гость: {un}\nАпартамент: {apt_name}\n"
+                                        f"Хочет заехать: {text}\n\n"
+                                        f"Ответьте Reply — гость получит автоматически!"
+                            }
+                        )
+                        msg_data = r.json()
+                        if msg_data.get("ok"):
+                            max_promo_map[msg_data["result"]["message_id"]] = uid
+                except Exception as e:
+                    print(f"[MAX] Ошибка раннего заезда: {e}", flush=True)
             max_states[uid] = "verified"
             await event.message.answer(
-                "✅ Хорошо, передали информацию администратору!\n\n"
-                "Оператор свяжется с вами в ближайшее время и подтвердит возможность раннего заезда. ⏱\n\n"
+                "✅ Запрос на ранний заезд отправлен!\n\n"
+                "Оператор свяжется с вами в ближайшее время и подтвердит. ⏱\n\n"
                 "Если есть другие вопросы — готов помочь! 😊"
             )
             return
 
         if state == "waiting_late_time_max":
             apt_name = max_apt.get(uid, "апартамент")
-            await tg_admin(f"🕐 Поздний выезд (MAX)\nГость: {un}\nАпартамент: {apt_name}\nВремя: {text}")
+            tg_tok = os.getenv("TELEGRAM_TOKEN")
+            admin_id = get_admin_chat_id()
+            if admin_id and tg_tok:
+                try:
+                    import httpx as _hx
+                    async with _hx.AsyncClient() as c:
+                        r = await c.post(
+                            f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={
+                                "chat_id": admin_id,
+                                "text": f"🕐 Поздний выезд (MAX)\n\n"
+                                        f"Гость: {un}\nАпартамент: {apt_name}\n"
+                                        f"Хочет выехать до: {text}\n\n"
+                                        f"Ответьте Reply — гость получит автоматически!"
+                            }
+                        )
+                        msg_data = r.json()
+                        if msg_data.get("ok"):
+                            max_promo_map[msg_data["result"]["message_id"]] = uid
+                except Exception as e:
+                    print(f"[MAX] Ошибка позднего выезда: {e}", flush=True)
             max_states[uid] = "verified"
             await event.message.answer(
-                "✅ Хорошо, передали информацию администратору!\n\n"
-                "Оператор свяжется с вами в ближайшее время и подтвердит возможность позднего выезда. ⏱\n\n"
+                "✅ Запрос на поздний выезд отправлен!\n\n"
+                "Оператор свяжется с вами в ближайшее время и подтвердит. ⏱\n\n"
                 "Если есть другие вопросы — готов помочь! 😊"
             )
             return
