@@ -3228,49 +3228,19 @@ def start_max_bot():
         # Обработка текстовых команд выезда и продления через ИИ
         # Обработка текстовых команд выезда и продления через ИИ
         if state == "verified" and text:
-            apt_name = max_apt.get(uid, "неизвестный апартамент")
-            tg_tok = os.getenv("TELEGRAM_TOKEN")
-            admin_id = get_admin_chat_id()
-            if admin_id and tg_tok:
-                try:
-                    import httpx as _hx
-                    async with _hx.AsyncClient() as c:
-                        r = await c.post(
-                            f"https://api.telegram.org/bot{tg_tok}/sendMessage",
-                            json={
-                                "chat_id": admin_id,
-                                "text": f"🔄 Запрос на продление/новую бронь (MAX)\n\n"
-                                        f"Гость: {un}\nАпартамент: {apt_name}\n\n"
-                                        f"Даты: {text}\n\n"
-                                        f"Ответьте Reply с реквизитами или подтверждением — гость получит автоматически!"
-                            }
-                        )
-                        msg_data = r.json()
-                        if msg_data.get("ok"):
-                            max_promo_map[msg_data["result"]["message_id"]] = uid
-                except Exception as e:
-                    print(f"[MAX] Ошибка продления: {e}", flush=True)
-            max_states[uid] = "verified"
-            await event.message.answer(
-                "✅ Запрос на продление отправлен администратору!\n\n"
-                "Ожидайте ответа — вам придёт сообщение в ближайшее время.\n\n"
-                "Также вы можете позвонить на горячую линию:\n"
-                "📞 +7 918 148 00 45 (10:00–22:00)\n\n"
-                "Если есть другие вопросы — задавайте, я готов помочь! 😊"
-            )
-            return
+            text_lower = text.lower().strip()
 
+            # Проверяем явные маркеры без лишнего вызова ИИ
+            checkout_words = ["выехали", "выехал", "выехала", "съехали", "съехал", "покинули", "уже уехали", "мы уехали", "положили ключи"]
+            extend_words = ["продлить", "хочу продлить", "продление", "хотим продлить", "можно продлить", "новую бронь", "забронировать ещё"]
 
-            # ИИ определяет намерение
-            intent_resp = claude.messages.create(
-                model="claude-sonnet-4-6", max_tokens=10,
-                messages=[{"role":"user","content":
-                    f"Определи намерение гостя. Текст: \"{text}\"\n\n"
-                    f"ВЫЕЗД — ТОЛЬКО если гость прямо говорит что уже выехал/съехал/покинул квартиру прямо сейчас.\n"
-                    f"ПРОДЛЕНИЕ — ТОЛЬКО если гость явно просит продлить проживание или сделать новую бронь на конкретные даты.\n"
-                    f"ДРУГОЕ — любой вопрос, благодарность, проблема, запрос помощи, парковка, домофон, минисейф и всё остальное.\n\n"
-                    f"Ответь только одним словом: ВЫЕЗД, ПРОДЛЕНИЕ или ДРУГОЕ"}])
-            intent = intent_resp.content[0].text.strip().upper()
+            if any(w in text_lower for w in checkout_words):
+                intent = "ВЫЕЗД"
+            elif any(w in text_lower for w in extend_words):
+                intent = "ПРОДЛЕНИЕ"
+            else:
+                intent = "ДРУГОЕ"
+
             print(f"[MAX] Намерение: {intent}", flush=True)
 
             if "ВЫЕЗД" in intent:
