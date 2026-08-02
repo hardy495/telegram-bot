@@ -932,12 +932,7 @@ async def set_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Не удалось найти код минисейфа в {apt_key}. Проверьте базу через /list")
 
 
-    if not is_admin(update.effective_user):
-        return
-    full_text = " ".join(context.args) if context.args else ""
-    if not full_text:
-        await update.message.reply_text("Пример: /b Иванов Иван с 01.07 по 05.07 3500")
-        return
+async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     from datetime import date as date_cls
     today_str = date_cls.today().strftime("%d.%m.%Y")
