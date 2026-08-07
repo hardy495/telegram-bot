@@ -425,6 +425,40 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         )
         return
 
+    # Кнопка "Получил" для MAX гостя
+    if query.data.startswith("max_received_"):
+        max_guest_id = int(query.data.split("_")[2])
+
+        # Проверяем есть ли паспорт
+        has_passport = guest_docs.get(max_guest_id, {}).get("has_passport", False)
+
+        if not has_passport:
+            max_states[max_guest_id] = "waiting_docs"
+            guest_docs.setdefault(max_guest_id, {})["has_payment"] = True
+            max_outbox[max_guest_id] = (
+                "✅ Оплата подтверждена!\n\n"
+                "Для завершения оформления пришлите пожалуйста фото паспорта (лицевая сторона) 📄"
+            )
+            await query.edit_message_text("✅ Оплата подтверждена! Ожидаем паспорт от гостя.")
+            return
+
+        # Паспорт есть — показываем список апартаментов
+        memory = load_memory()
+        objects = memory.get("objects", {})
+        if not objects:
+            await query.edit_message_text("⚠️ База апартаментов пуста!")
+            return
+
+        buttons = []
+        for i, name in enumerate(objects.keys()):
+            buttons.append([InlineKeyboardButton(f"🏠 {name}", callback_data=f"maxapt_{max_guest_id}_{i}")])
+        keyboard = InlineKeyboardMarkup(buttons)
+        await query.edit_message_text(
+            "✅ Оплата получена!\n\nВыберите апартамент для отправки гостю в MAX:",
+            reply_markup=keyboard
+        )
+        return
+
     # Кнопка "Не получил" для MAX гостя
     if query.data.startswith("max_not_received_"):
         max_guest_id = int(query.data.split("_")[3])
