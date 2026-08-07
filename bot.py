@@ -908,10 +908,13 @@ async def del_gornichnaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_gornichnaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/listmaids — показать всех горничных"""
+    """/listgornichnaya — показать всех горничных"""
+    print(f"[MAIDS] list_gornichnaya вызвана от {update.effective_user.username}", flush=True)
     if not is_admin(update.effective_user):
+        print(f"[MAIDS] Не админ!", flush=True)
         return
     maids = load_maids()
+    print(f"[MAIDS] Данные: {maids}", flush=True)
     if not maids:
         await update.message.reply_text("Горничные не настроены.\n\nДобавьте: `/setmaid КВ CHAT_ID`", parse_mode="Markdown")
         return
