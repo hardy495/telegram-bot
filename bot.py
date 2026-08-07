@@ -24,6 +24,32 @@ def escape_md(text):
 MEMORY_FILE = "memory.json"
 ADMIN_FILE = "admin.json"
 BALANCES_FILE = "balances.json"
+MAIDS_FILE = "maids.json"
+
+def load_maids():
+    """Загружаем список горничных: {apt_key: [chat_id1, chat_id2]}"""
+    if os.path.exists(MAIDS_FILE):
+        with open(MAIDS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_maids(maids):
+    with open(MAIDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(maids, f, ensure_ascii=False, indent=2)
+
+async def notify_maids(context, apt_name, message):
+    """Отправить уведомление горничным данного апартамента"""
+    maids = load_maids()
+    # Ищем горничных для этого апартамента или общих (ключ "all")
+    apt_key = apt_name.replace(" ", "_").lower()
+    chat_ids = maids.get(apt_key, []) + maids.get("all", [])
+    for cid in set(chat_ids):
+        try:
+            await context.bot.send_message(chat_id=int(cid), text=message, parse_mode="Markdown")
+        except Exception as e:
+            print(f"[MAID] Ошибка отправки горничной {cid}: {e}", flush=True)
+
+
 
 def load_balances_from_file():
     if os.path.exists(BALANCES_FILE):
@@ -127,8 +153,10 @@ SYSTEM_PROMPT = """Ты вежливый и профессиональный п�
 - Залог 2000 рублей возвращается в день выезда до конца дня при отсутствии повреждений.
 
 === ОСНАЩЕНИЕ ВСЕХ АПАРТАМЕНТОВ ===
-Во всех апартаментах есть: утюг, гладильная доска, полотенца, постельное бельё, фен, гель для душа.
+Во всех апартаментах есть: утюг, гладильная доска, полотенца, постельное бельё, фен, гель для душа, туалетная бумага (1 рулон).
 Если гость спрашивает где взять дополнительное бельё или полотенца — они находятся в шкафу. Если в шкафу нет — можно взять с сушилки.
+Если гость говорит что нет туалетной бумаги или геля для душа — ответь что все апартаменты укомплектованы гелем для душа и рулоном туалетной бумаги, они должны быть в ванной комнате. Попроси гостя проверить ещё раз. Если у гостя есть дополнительные пожелания — попроси озвучить их одним сообщением и скажи что передашь администратору. Это НЕ является претензией — не добавляй тег [ЖАЛОБА].
+Если гость озвучивает пожелания или просьбы (принести что-то, добавить что-то) — ответь что передаёшь администратору и добавь в конец ответа: [ПОЖЕЛАНИЕ]
 
 === ПАРКОВКА И ВЪЕЗД НА ТЕРРИТОРИЮ ===
 Для апартаментов на ул. Октябрьской:
@@ -273,19 +301,20 @@ async def analyze_photo_with_ai(photo_bytes: bytes, expected_type: str, expected
         if expected_amount:
             prompt = f"""Внимательно посмотри на этот чек или подтверждение платежа.
 
-1. Это чек об оплате, квитанция или подтверждение платежа? 
-2. Если да — найди сумму перевода в документе.
-3. Сравни с ожидаемой суммой: {expected_amount} рублей.
+1. Это чек об оплате, квитанция, скриншот из банка или подтверждение перевода?
+2. Найди ИТОГОВУЮ сумму перевода — ищи слова "Сумма", "Итого", "Перевод", "Списано", "Зачислено" рядом с числом.
+3. Ожидаемая сумма: {expected_amount} рублей.
 
 Ответь строго в формате:
 ЧЕК: ДА или НЕТ
-СУММА: (напиши найденную сумму цифрами, или НЕИЗВЕСТНО если не видно)
+СУММА: (только цифры найденной суммы, без слова "руб", или НЕИЗВЕСТНО)
 СОВПАДАЕТ: ДА или НЕТ или НЕИЗВЕСТНО"""
         else:
-            prompt = """Это чек об оплате, квитанция или подтверждение платежа? 
+            prompt = """Это чек об оплате, квитанция, скриншот из банка или подтверждение перевода?
+Найди итоговую сумму перевода — ищи слова "Сумма", "Итого", "Перевод", "Списано", "Зачислено".
 Ответь строго в формате:
 ЧЕК: ДА или НЕТ
-СУММА: (напиши найденную сумму цифрами, или НЕИЗВЕСТНО если не видно)
+СУММА: (только цифры, или НЕИЗВЕСТНО)
 СОВПАДАЕТ: НЕИЗВЕСТНО"""
 
         response = claude.messages.create(
@@ -342,8 +371,41 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
 
-    # Кнопка "Получил" для MAX гостя
-    if query.data.startswith("max_received_"):
+    # Кнопка "Отправил залог" — TG гость
+    if query.data.startswith("deposit_sent_tg_"):
+        guest_id = int(query.data.split("_")[3])
+        await query.answer()
+        await query.edit_message_reply_markup(reply_markup=None)
+        deposit_msg = (
+            "🎉 *Отличные новости!*\n\n"
+            "Мы произвели возврат вашего залога в полном объёме.\n\n"
+            "Благодарим вас за то что выбрали *Alekseev Apartments!* 🏠✨\n\n"
+            "Вы всегда желанный гость — будем рады видеть вас снова!\n\n"
+            "Хорошего вам дня! 😊"
+        )
+        await context.bot.send_message(
+            chat_id=guest_id,
+            text=deposit_msg,
+            parse_mode="Markdown"
+        )
+        await query.edit_message_text("✅ Гость уведомлён о переводе залога!")
+        return
+
+    # Кнопка "Отправил залог" — MAX гость
+    if query.data.startswith("deposit_sent_max_"):
+        max_uid = int(query.data.split("_")[3])
+        await query.answer()
+        max_outbox[max_uid] = {
+            "text": "🎉 Отличные новости!\n\n"
+                    "Мы произвели возврат вашего залога в полном объёме.\n\n"
+                    "Благодарим вас за то что выбрали Alekseev Apartments! 🏠✨\n\n"
+                    "Вы всегда желанный гость — будем рады видеть вас снова!\n\n"
+                    "Хорошего вам дня! 😊"
+        }
+        await query.edit_message_text("✅ Гость уведомлён о переводе залога!")
+        return
+
+
         max_guest_id = int(query.data.split("_")[2])
         un = f"MAX гость {max_guest_id}"
 
@@ -644,6 +706,11 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
                 parse_mode="Markdown"
             )
 
+        # Уведомляем горничных
+        await notify_maids(context, apt_name,
+            f"🧹 *Уборка — {apt_name}*\n\nГость выехал — апартамент готов к уборке!"
+        )
+
         await query.edit_message_reply_markup(reply_markup=None)
         await context.bot.send_message(
             chat_id=guest_id,
@@ -754,6 +821,70 @@ async def set_admin_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Нажмите *Reply* и напишите ответ — он уйдёт гостю! 👌",
         parse_mode="Markdown"
     )
+
+
+async def add_gornichnaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setmaid КВ CHAT_ID — добавить горничную для квартиры"""
+    if not is_admin(update.effective_user):
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Использование: `/setmaid КВ CHAT_ID`\n\n"
+            "Примеры:\n"
+            "`/setmaid 182 123456789` — горничная для 182 кв\n"
+            "`/setmaid all 123456789` — горничная для всех квартир\n\n"
+            "Несколько горничных: запустите команду дважды с разными ID",
+            parse_mode="Markdown"
+        )
+        return
+    apt = context.args[0].strip().lower().replace(" ", "_")
+    try:
+        chat_id = str(int(context.args[1].strip()))
+    except:
+        await update.message.reply_text("❌ Неверный формат CHAT_ID — только цифры")
+        return
+    maids = load_maids()
+    if apt not in maids:
+        maids[apt] = []
+    if chat_id not in maids[apt]:
+        maids[apt].append(chat_id)
+    save_maids(maids)
+    apt_display = "всех квартир" if apt == "all" else f"кв. {context.args[0]}"
+    await update.message.reply_text(f"✅ Горничная `{chat_id}` добавлена для *{apt_display}*", parse_mode="Markdown")
+
+
+async def del_gornichnaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/delmaid КВ CHAT_ID — удалить горничную"""
+    if not is_admin(update.effective_user):
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Использование: `/delmaid КВ CHAT_ID`", parse_mode="Markdown")
+        return
+    apt = context.args[0].strip().lower().replace(" ", "_")
+    chat_id = str(context.args[1].strip())
+    maids = load_maids()
+    if apt in maids and chat_id in maids[apt]:
+        maids[apt].remove(chat_id)
+        save_maids(maids)
+        await update.message.reply_text(f"✅ Горничная удалена из кв. {context.args[0]}")
+    else:
+        await update.message.reply_text("❌ Горничная не найдена")
+
+
+async def list_gornichnaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/listmaids — показать всех горничных"""
+    if not is_admin(update.effective_user):
+        return
+    maids = load_maids()
+    if not maids:
+        await update.message.reply_text("Горничные не настроены.\n\nДобавьте: `/setmaid КВ CHAT_ID`", parse_mode="Markdown")
+        return
+    text = "👩 *Список горничных:*\n\n"
+    for apt, ids in maids.items():
+        apt_display = "Все квартиры" if apt == "all" else f"Кв. {apt.replace('_', ' ')}"
+        text += f"*{apt_display}:* {', '.join(ids)}\n"
+    text += "\n_Чтобы узнать свой chat_id — попросите горничную написать боту /start_"
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1341,7 +1472,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             date_from = context.user_data.get("date_from", "")
             expected_amount = None
             for key, data in guest_balances.items():
-                name_match = data["name_lower"] in guest_name or guest_name in data["name_lower"]
+                name_match = bool(set(data["name_lower"].split()) & set(guest_name.split())) or data["name_lower"] in guest_name or guest_name in data["name_lower"]
                 date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
                 if name_match and date_match:
                     expected_amount = DEPOSIT if data["amount"] == 0 else data["amount"] + DEPOSIT
@@ -1470,7 +1601,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date_from = context.user_data.get("date_from", "")
         expected_amount = None
         for key, data in guest_balances.items():
-            name_match = data["name_lower"] in guest_name or guest_name in data["name_lower"]
+            name_match = bool(set(data["name_lower"].split()) & set(guest_name.split())) or data["name_lower"] in guest_name or guest_name in data["name_lower"]
             date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
             if name_match and date_match:
                 expected_amount = DEPOSIT if data["amount"] == 0 else data["amount"] + DEPOSIT
@@ -1633,7 +1764,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date_from = context.user_data.get("date_from", "")
         expected_amount = None
         for key, data in guest_balances.items():
-            name_match = data["name_lower"] in guest_name or guest_name in data["name_lower"]
+            name_match = bool(set(data["name_lower"].split()) & set(guest_name.split())) or data["name_lower"] in guest_name or guest_name in data["name_lower"]
             date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
             if name_match and date_match:
                 expected_amount = DEPOSIT if data["amount"] == 0 else data["amount"] + DEPOSIT
@@ -1881,7 +2012,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/b ФИО с ДД.ММ по ДД.ММ СУММА — добавить бронь\n"
             "/setcode КВ КОД — сменить пароль минисейфа\n"
             "/add название | инфо — добавить/обновить апартамент\n"
-            "/remember текст — запомнить заметку"
+            "/remember текст — запомнить заметку\n"
+            "/addgornichnaya КВ CHAT_ID — добавить горничную\n"
+            "/delgornichnaya КВ CHAT_ID — удалить горничную\n"
+            "/listgornichnaya — список горничных"
         )
         return
 
@@ -2094,7 +2228,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "role": "user",
                     "content": f"""Гость: имя="{name}", заезд="{date_from}", выезд="{date_to}"
 Брони: {bookings_text}
-Найди совпадение по имени и датам. Ответь только номером (1,2...) или 0."""
+Найди совпадение по имени и датам. Имя может быть неполным — ищи по любому совпадающему слову (имя или фамилия). Ответь только номером (1,2...) или 0."""
                 }]
             )
             try:
@@ -2264,9 +2398,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "РЕКВИЗИТЫ" in check:
             admin_id = get_admin_chat_id()
             if admin_id:
-                await context.bot.send_message(
+                sent = await context.bot.send_message(
                     chat_id=admin_id,
                     text=f"💳 Реквизиты для возврата залога\n\nАпартамент: {apt_name}\nГость: {username}\n\nРеквизиты:\n{user_text}"
+                )
+                # Кнопка "Отправил залог"
+                deposit_keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Отправил залог", callback_data=f"deposit_sent_tg_{user_id}")
+                ]])
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text="Нажмите когда отправите залог гостю:",
+                    reply_markup=deposit_keyboard
                 )
             await update.message.reply_text(
                 "Благодарим за реквизиты! ✅\n\n"
@@ -2309,6 +2452,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          f"Гость: {username}\n\n"
                          f"Реквизиты:\n{user_text}"
                 )
+                deposit_keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Отправил залог", callback_data=f"deposit_sent_tg_{user_id}")
+                ]])
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text="Нажмите когда отправите залог гостю:",
+                    reply_markup=deposit_keyboard
+                )
             await update.message.reply_text(
                 "Благодарим вас за реквизиты! ✅\n\n"
                 "Залог вернём сегодня до 00:00.\n\n"
@@ -2334,13 +2485,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
         username = f"@{user.username}" if user.username else f"{user.first_name}"
 
-        # ИИ определяет тональность отзыва
-        sentiment = claude.messages.create(
-            model="claude-sonnet-4-6", max_tokens=10,
-            messages=[{"role": "user", "content":
-                f"Это отзыв гостя об отеле: \"{user_text}\"\n"
-                f"Ответь только одним словом: ПОЗИТИВНЫЙ или НЕГАТИВНЫЙ"}]
-        ).content[0].text.strip().upper()
+        # Сначала проверяем короткие ответы да/нет
+        text_lower = user_text.lower().strip()
+        positive_words = ["да", "да!", "всё понравилось", "все понравилось", "хорошо", "отлично", "супер", "класс", "👍", "👌", "❤️", "все хорошо", "всё хорошо"]
+        negative_words = ["нет", "нет!", "не понравилось", "плохо", "ужасно", "не очень", "👎"]
+
+        if any(text_lower == w or text_lower.startswith(w) for w in positive_words):
+            sentiment = "ПОЗИТИВНЫЙ"
+        elif any(text_lower == w or text_lower.startswith(w) for w in negative_words):
+            sentiment = "НЕГАТИВНЫЙ"
+        else:
+            # ИИ определяет тональность развёрнутого отзыва
+            sentiment = claude.messages.create(
+                model="claude-sonnet-4-6", max_tokens=10,
+                messages=[{"role": "user", "content":
+                    f"Это отзыв гостя об отеле: \"{user_text}\"\n"
+                    f"Ответь только одним словом: ПОЗИТИВНЫЙ или НЕГАТИВНЫЙ"}]
+            ).content[0].text.strip().upper()
 
         # Отправляем отзыв администратору
         admin_id = get_admin_chat_id()
@@ -2540,6 +2701,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Также передал ваш вопрос оператору — он свяжется с вами в ближайшее время! 😊"
         )
         conversation_history[user_id].append({"role": "assistant", "content": clean_reply or reply})
+    elif "[ПОЖЕЛАНИЕ]" in reply:
+        await notify_admin_question(context, f"💬 Пожелание гостя:\n{user_text}", user)
+        clean_reply = reply.replace("[ПОЖЕЛАНИЕ]", "").strip()
+        clean_reply += "\n\nСпасибо за ваше пожелание! 🙏 Мы передали его администратору."
+        conversation_history[user_id].append({"role": "assistant", "content": clean_reply})
+        await update.message.reply_text(clean_reply)
     elif "[ЖАЛОБА]" in reply:
         # Уведомляем администратора
         await notify_admin_question(context, f"⚠️ ЖАЛОБА/ПРЕТЕНЗИЯ:\n{user_text}", user)
@@ -2558,6 +2725,9 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("newbook", newbook))
 app.add_handler(CommandHandler("admin", set_admin_id))
 app.add_handler(CommandHandler("maxapt", maxapt_command))
+app.add_handler(CommandHandler("addgornichnaya", add_gornichnaya))
+app.add_handler(CommandHandler("delgornichnaya", del_gornichnaya))
+app.add_handler(CommandHandler("listgornichnaya", list_gornichnaya))
 app.add_handler(CommandHandler("setcode", set_code))
 app.add_handler(CommandHandler("b", set_balance))
 app.add_handler(CommandHandler("remember", remember))
@@ -3240,27 +3410,55 @@ def start_max_bot():
 
         if state == "waiting_requisites_negative":
             apt_name = max_apt.get(uid, "неизвестный апартамент")
-            await tg_admin(f"💳 Реквизиты (MAX)\nАпартамент: {apt_name}\nГость: {un}\n\n{text}")
+            tg_tok = os.getenv("TELEGRAM_TOKEN")
+            admin_id = get_admin_chat_id()
+            if admin_id and tg_tok:
+                try:
+                    import httpx as _hx
+                    async with _hx.AsyncClient() as c:
+                        await c.post(f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={"chat_id": admin_id,
+                                  "text": f"💳 Реквизиты (MAX)\nАпартамент: {apt_name}\nГость: {un}\n\n{text}"})
+                        await c.post(f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={"chat_id": admin_id,
+                                  "text": "Нажмите когда отправите залог гостю:",
+                                  "reply_markup": {"inline_keyboard": [[
+                                      {"text": "✅ Отправил залог", "callback_data": f"deposit_sent_max_{uid}"}
+                                  ]]}})
+                except Exception as e:
+                    print(f"[MAX] Ошибка реквизитов: {e}", flush=True)
             await event.message.answer(
                 "Благодарим за реквизиты! ✅\n\n"
                 "Залог вернём сегодня до 00:00.\n\n"
-                "Мы обязательно свяжемся с вами в ближайшее время чтобы выяснить что произошло и дать обратную связь. 🙏"
+                "Мы обязательно свяжемся с вами в ближайшее время. 🙏"
             )
             max_states[uid] = "checkout_done_max"
             return
 
         if state == "waiting_requisites":
             apt_name = max_apt.get(uid, "неизвестный апартамент")
-            await tg_admin(f"💳 Реквизиты (MAX)\nАпартамент: {apt_name}\nГость: {un}\n\nРеквизиты:\n{text}")
+            tg_tok = os.getenv("TELEGRAM_TOKEN")
+            admin_id = get_admin_chat_id()
+            if admin_id and tg_tok:
+                try:
+                    import httpx as _hx
+                    async with _hx.AsyncClient() as c:
+                        await c.post(f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={"chat_id": admin_id,
+                                  "text": f"💳 Реквизиты (MAX)\nАпартамент: {apt_name}\nГость: {un}\n\n{text}"})
+                        await c.post(f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={"chat_id": admin_id,
+                                  "text": "Нажмите когда отправите залог гостю:",
+                                  "reply_markup": {"inline_keyboard": [[
+                                      {"text": "✅ Отправил залог", "callback_data": f"deposit_sent_max_{uid}"}
+                                  ]]}})
+                except Exception as e:
+                    print(f"[MAX] Ошибка реквизитов: {e}", flush=True)
             await event.message.answer(
                 "Благодарим за реквизиты! ✅\n\n"
                 "Залог вернём сегодня до 00:00.\n\n"
-                "Будем рады если вы оставите отзыв на площадке где бронировали "
-                "(Авито, Островок, Яндекс Путешествия и т.д.).\n\n"
-                "🎁 За скриншот отзыва мы подарим промокод:\n"
-                "• 500 руб. от 1 суток\n"
-                "• 1000 руб. от 2 суток\n\n"
-                "Пришлите скриншот сюда! 📸"
+                "Будем рады если вы оставите отзыв на площадке где бронировали!\n\n"
+                "🎁 За скриншот — промокод 500 или 1000 руб. Пришлите скриншот сюда! 📸"
             )
             max_states[uid] = "waiting_review_screenshot_max"
             return
@@ -3268,12 +3466,22 @@ def start_max_bot():
         if state == "waiting_feedback":
             apt_name = max_apt.get(uid, "неизвестный апартамент")
 
-            # ИИ определяет тональность
-            sentiment = claude.messages.create(
-                model="claude-sonnet-4-6", max_tokens=10,
-                messages=[{"role":"user","content":
-                    f"Это отзыв гостя: \"{text}\"\nОтветь только: ПОЗИТИВНЫЙ или НЕГАТИВНЫЙ"}]
-            ).content[0].text.strip().upper()
+            # Сначала проверяем короткие ответы
+            text_lower = text.lower().strip()
+            positive_words = ["да", "да!", "всё понравилось", "все понравилось", "хорошо", "отлично", "супер", "класс", "все хорошо", "всё хорошо"]
+            negative_words = ["нет", "нет!", "не понравилось", "плохо", "ужасно", "не очень"]
+
+            if any(text_lower == w or text_lower.startswith(w) for w in positive_words):
+                sentiment = "ПОЗИТИВНЫЙ"
+            elif any(text_lower == w or text_lower.startswith(w) for w in negative_words):
+                sentiment = "НЕГАТИВНЫЙ"
+            else:
+                # ИИ определяет тональность
+                sentiment = claude.messages.create(
+                    model="claude-sonnet-4-6", max_tokens=10,
+                    messages=[{"role":"user","content":
+                        f"Это отзыв гостя: \"{text}\"\nОтветь только: ПОЗИТИВНЫЙ или НЕГАТИВНЫЙ"}]
+                ).content[0].text.strip().upper()
 
             await tg_admin(
                 f"{'⭐' if 'ПОЗИТИВ' in sentiment else '⚠️'} Отзыв (MAX)\n"
@@ -3339,6 +3547,12 @@ def start_max_bot():
                 max_hist[uid].append({"role":"assistant","content":clean_reply})
                 await event.message.answer(clean_reply)
             await event.message.answer("Также передал ваш вопрос оператору — свяжемся в ближайшее время! 😊")
+        elif "[ПОЖЕЛАНИЕ]" in reply:
+            await tg_admin(f"💬 Пожелание гостя (MAX) от {un}:\n\n{text}")
+            clean_reply = reply.replace("[ПОЖЕЛАНИЕ]", "").strip()
+            clean_reply += "\n\nСпасибо за ваше пожелание! 🙏 Мы передали его администратору."
+            max_hist[uid].append({"role":"assistant","content":clean_reply})
+            await event.message.answer(clean_reply)
         elif "[ЖАЛОБА]" in reply:
             await tg_admin(f"⚠️ ЖАЛОБА/ПРЕТЕНЗИЯ (MAX) от {un}:\n\n{text}")
             clean_reply = reply.replace("[ЖАЛОБА]", "").strip()
