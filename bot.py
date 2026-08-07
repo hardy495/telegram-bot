@@ -26,11 +26,6 @@ ADMIN_FILE = "admin.json"
 BALANCES_FILE = "balances.json"
 MAIDS_FILE = "maids.json"
 
-def load_maids():
-    """Загружаем список горничных из memory.json"""
-    memory = load_memory()
-    return memory.get("maids", {})
-
 def save_maids(maids):
     memory = load_memory()
     memory["maids"] = maids
@@ -111,6 +106,10 @@ def load_memory():
 def save_memory(memory):
     with open(MEMORY_FILE, "w", encoding="utf-8") as f:
         json.dump(memory, f, ensure_ascii=False, indent=2)
+
+def load_maids():
+    """Загружаем список горничных из memory.json"""
+    return load_memory().get("maids", {})
 
 def get_all_knowledge():
     memory = load_memory()
