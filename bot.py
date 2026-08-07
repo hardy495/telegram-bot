@@ -27,27 +27,27 @@ BALANCES_FILE = "balances.json"
 MAIDS_FILE = "maids.json"
 
 def load_maids():
-    """Загружаем список горничных: {apt_key: [chat_id1, chat_id2]}"""
-    if os.path.exists(MAIDS_FILE):
-        with open(MAIDS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    """Загружаем список горничных из memory.json"""
+    memory = load_memory()
+    return memory.get("maids", {})
 
 def save_maids(maids):
-    with open(MAIDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(maids, f, ensure_ascii=False, indent=2)
+    memory = load_memory()
+    memory["maids"] = maids
+    save_memory(memory)
 
 async def notify_maids(context, apt_name, message):
     """Отправить уведомление горничным данного апартамента"""
     maids = load_maids()
-    # Ищем горничных для этого апартамента или общих (ключ "all")
     apt_key = apt_name.replace(" ", "_").lower()
     chat_ids = maids.get(apt_key, []) + maids.get("all", [])
+    print(f"[MAIDS] Уведомление для {apt_name} (ключ: {apt_key}), горничные: {chat_ids}", flush=True)
     for cid in set(chat_ids):
         try:
             await context.bot.send_message(chat_id=int(cid), text=message, parse_mode="Markdown")
+            print(f"[MAIDS] Отправлено горничной {cid}", flush=True)
         except Exception as e:
-            print(f"[MAID] Ошибка отправки горничной {cid}: {e}", flush=True)
+            print(f"[MAIDS] Ошибка отправки горничной {cid}: {e}", flush=True)
 
 
 
