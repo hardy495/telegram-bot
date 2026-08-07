@@ -429,8 +429,10 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
     if query.data.startswith("max_received_"):
         max_guest_id = int(query.data.split("_")[2])
 
-        # Проверяем есть ли паспорт
-        has_passport = guest_docs.get(max_guest_id, {}).get("has_passport", False)
+        # Паспорт уже был если state=waiting_admin_confirmation или есть в guest_docs
+        has_passport = (guest_docs.get(max_guest_id, {}).get("has_passport", False) or
+                       max_docs.get(max_guest_id, {}).get("has_passport", False) or
+                       max_states.get(max_guest_id) == "waiting_admin_confirmation")
 
         if not has_passport:
             max_states[max_guest_id] = "waiting_docs"
@@ -614,8 +616,10 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         guest_id = int(query.data.split("_")[1])
         admin_chat_id = str(query.message.chat_id)
 
-        # Проверяем есть ли паспорт от гостя через единый guest_docs
-        has_passport = guest_docs.get(guest_id, {}).get("has_passport", False)
+        # Если гость в состоянии waiting_admin_confirmation — оба документа уже были получены
+        # Проверяем паспорт через guest_docs ИЛИ через состояние
+        has_passport = (guest_docs.get(guest_id, {}).get("has_passport", False) or
+                       guest_states.get(guest_id) == "waiting_admin_confirmation")
 
         if not has_passport:
             await context.bot.send_message(
@@ -624,7 +628,6 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
                      "Для завершения оформления пришлите пожалуйста фото паспорта (лицевая сторона) 📄"
             )
             guest_states[guest_id] = "waiting_docs"
-            # Сохраняем что оплата подтверждена
             guest_docs.setdefault(guest_id, {})["has_payment"] = True
             await query.edit_message_text("✅ Оплата подтверждена! Ожидаем паспорт от гостя.")
             return
