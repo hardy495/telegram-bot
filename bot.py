@@ -56,9 +56,30 @@ def save_balances_to_file(balances):
     with open(BALANCES_FILE, "w", encoding="utf-8") as f:
         json.dump(balances, f, ensure_ascii=False, indent=2)
 
+STATES_FILE = "guest_states.json"
+
+def load_guest_states():
+    if os.path.exists(STATES_FILE):
+        try:
+            with open(STATES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {int(k): v for k, v in data.items()}
+        except:
+            pass
+    return {}
+
+def save_guest_state(user_id, state):
+    states = load_guest_states()
+    if state is None:
+        states.pop(user_id, None)
+    else:
+        states[user_id] = state
+    with open(STATES_FILE, "w", encoding="utf-8") as f:
+        json.dump(states, f, ensure_ascii=False, indent=2)
+
 # Загружаем балансы из файла при старте
 guest_balances = load_balances_from_file()
-guest_states = {}
+guest_states = load_guest_states()  # Загружаем состояния из файла
 conversation_history = {}
 pending_guest = {}
 notification_to_guest = {}
@@ -160,10 +181,10 @@ SYSTEM_PROMPT = """Ты вежливый и профессиональный п�
 === ПАРКОВКА И ВЪЕЗД НА ТЕРРИТОРИЮ ===
 Для апартаментов на ул. Октябрьской:
 • Запарковаться можно в любом свободном месте во дворе
-• Ворота автоматически не открываются при подъезде к ним
-• Самые активные ворота — №1 (со стороны ул. Октябрьская между двумя Пятёрочками) — через них быстрее всего заехать и выехать на трафике вместе с другими машинами
+• Ворота автоматически не открываются при подъезде — чтобы попасть на территорию позвоните на номер +7 918 148 00 45 и нажмите цифру 4 — откроются ворота №1 с ул. Октябрьская (между двумя Пятёрочками)
+• Выехать можно так же — позвонить и нажать 4, или выехать вместе с другими машинами на трафике
 • Также можно въехать/выехать через ворота №2, №3 и №4 — но через первые значительно быстрее
-• Альтернатива: парковка со стороны Галереи вдоль дороги или со стороны ул. Кирова — там платная городская парковка с 8:00 до 20:00 по будням
+• Альтернатива: парковка со стороны Галереи или ул. Кирова — платная городская парковка с 8:00 до 20:00 по будням
 
 Для апартамента на ул. Красная 176:
 • Платная парковка на -1 этаже здания — индивидуальное место стоит 1000 руб/сутки
@@ -192,7 +213,19 @@ SYSTEM_PROMPT = """Ты вежливый и профессиональный п�
 2. Одновременно потяните дверцу минисейфа на себя (открывается сверху вниз)
 3. Внутри лежат ключи — берите и открывайте квартиру
 
-⚠️ Если не открывается домофон, не срабатывает пароль или рычажок минисейфа не опускается — проверьте что вы у правильного подъезда и в правильном доме/корпусе. На Октябрьской несколько корпусов — легко перепутать. По 159 кв — корпус 3, подъезд 3. По 243 кв — корпус без номера, подъезд 4. По 49 кв — подъезд 1. По 7 кв — корпус 3, подъезд 1.
+=== ПОМОЩЬ С ЗАСЕЛЕНИЕМ (НЕ ЖАЛОБА) ===
+Если гость не может открыть дверь подъезда, домофон не реагирует или не открывается — это НЕ претензия, нужно помочь:
+• Объясни что домофон открывается кодом квартиры (например 208 для 182 кв) — набрать номер квартиры на домофоне, дождаться сигнала и дверь откроется
+• Если домофон не реагирует — возможно гость у неправильного подъезда или дома, попроси проверить
+
+Если гость не может найти минисейф или говорит что его нет — это НЕ претензия, нужно помочь:
+• Минисейф находится рядом с дверью в квартиру или у входа на этаже
+• По 159 кв — рядом с минисейфом стоит шкаф, это ориентир
+• Если минисейфа нет — скорее всего гость не в том доме или подъезде
+• На Октябрьской несколько корпусов — легко перепутать: 159 кв — корпус 3 подъезд 3, 243 кв — подъезд 4, 49 кв — подъезд 1, 7 кв — корпус 3 подъезд 1
+• Если пароль не срабатывает или рычажок не опускается — проверить правильный ли подъезд и корпус
+
+Эти ситуации (домофон, минисейф, ворота) — это вопросы о помощи, НЕ жалобы. Не добавляй тег [ЖАЛОБА]. Помоги гостю самостоятельно используя информацию выше.
 
 === ПРАВИЛА ОБЩЕНИЯ ===
 - Отвечай только на русском языке
@@ -298,15 +331,15 @@ async def analyze_photo_with_ai(photo_bytes: bytes, expected_type: str, expected
     else:
         # Проверяем чек и сумму
         if expected_amount:
-            prompt = f"""Внимательно посмотри на этот чек или подтверждение платежа.
+            prompt = f"""Внимательно посмотри на этот банковский чек или подтверждение перевода.
 
-1. Это чек об оплате, квитанция, скриншот из банка или подтверждение перевода?
-2. Найди ИТОГОВУЮ сумму перевода — ищи слова "Сумма", "Итого", "Перевод", "Списано", "Зачислено" рядом с числом.
-3. Ожидаемая сумма: {expected_amount} рублей.
+1. Это чек об оплате или подтверждение банковского перевода? (не скриншот баланса)
+2. Найди СУММУ ПЕРЕВОДА — это главное число в чеке рядом со словами "Сумма перевода", "Сумма операции", "Перевод", "Списано", "Итого". НЕ бери остаток на счёте, НЕ бери комиссию.
+3. Ожидаемая сумма перевода: {expected_amount} рублей.
 
-Ответь строго в формате:
+Ответь строго в формате (только эти три строки):
 ЧЕК: ДА или НЕТ
-СУММА: (только цифры найденной суммы, без слова "руб", или НЕИЗВЕСТНО)
+СУММА: (только цифры суммы ПЕРЕВОДА без слова руб, или НЕИЗВЕСТНО)
 СОВПАДАЕТ: ДА или НЕТ или НЕИЗВЕСТНО"""
         else:
             prompt = """Это чек об оплате, квитанция, скриншот из банка или подтверждение перевода?
@@ -525,12 +558,16 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
                 parse_mode="Markdown"
             )
 
-        max_states[max_guest_id] = "waiting_requisites"
+        # Уведомляем горничных
+        await notify_maids(context, apt_name,
+            f"🧹 *Уборка — {apt_name}*\n\nГость выехал — апартамент готов к уборке!"
+        )
+
+        max_states[max_guest_id] = "waiting_feedback"
         max_outbox[max_guest_id] = {
             "text": "Спасибо что выбрали Alekseev Apartments! 🙏\n\n"
-                    "Для возврата залога пришлите пожалуйста ваши реквизиты:\n\n"
-                    "Номер телефона / Банк / ФИО получателя\n\n"
-                    "Например: +79001234567 / Сбербанк / Иванов Иван Иванович"
+                    "Подскажите пожалуйста, всё ли понравилось по проживанию, всё ли хорошо? 😊\n\n"
+                    "_Ответьте пожалуйста — это необходимо для продолжения процедуры выселения_"
         }
         return
 
@@ -751,13 +788,12 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         await context.bot.send_message(
             chat_id=guest_id,
             text="Спасибо что выбрали *Alekseev Apartments!* 🙏\n\n"
-                 "Нам очень важно ваше мнение — пожалуйста дайте обратную связь здесь в чате!\n\n"
-                 "Как вам понравилось проживание? 😊",
+                 "Подскажите пожалуйста, всё ли понравилось по проживанию, всё ли хорошо? 😊\n\n"
+            "_Ответьте пожалуйста — это необходимо для продолжения процедуры выселения_",
             parse_mode="Markdown"
         )
         guest_states[guest_id] = "waiting_feedback"
-
-    # Кнопка "Продление/Новая бронь"
+        save_guest_state(guest_id, "waiting_feedback")
     elif query.data.startswith("newbooking_"):
         guest_id = int(query.data.split("_")[1])
         await query.answer()  # просто закрываем спиннер, не убираем кнопки
@@ -909,20 +945,16 @@ async def del_gornichnaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_gornichnaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/listgornichnaya — показать всех горничных"""
-    print(f"[MAIDS] list_gornichnaya вызвана от {update.effective_user.username}", flush=True)
-    if not is_admin(update.effective_user):
-        print(f"[MAIDS] Не админ!", flush=True)
-        return
+    print(f"[MAIDS] list_gornichnaya вызвана от {update.effective_user.id} @{update.effective_user.username}", flush=True)
     maids = load_maids()
     print(f"[MAIDS] Данные: {maids}", flush=True)
     if not maids:
-        await update.message.reply_text("Горничные не настроены.\n\nДобавьте: `/setmaid КВ CHAT_ID`", parse_mode="Markdown")
+        await update.message.reply_text("Горничные не настроены.\n\nДобавьте: `/addgornichnaya КВ CHAT_ID`", parse_mode="Markdown")
         return
     text = "👩 *Список горничных:*\n\n"
     for apt, ids in maids.items():
-        apt_display = "Все квартиры" if apt == "all" else f"Кв. {apt.replace('_', ' ')}"
+        apt_display = f"Кв. {apt.replace('_кв', '').replace('_', ' ')}"
         text += f"*{apt_display}:* {', '.join(ids)}\n"
-    text += "\n_Чтобы узнать свой chat_id — попросите горничную написать боту /start_"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
@@ -2520,7 +2552,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    if state == "waiting_feedback":
+    if state in ["waiting_feedback", "checkout_done"]:
         apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
         username = f"@{user.username}" if user.username else f"{user.first_name}"
 
@@ -2701,10 +2733,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
         guest_states[user_id] = "waiting_feedback"
+        save_guest_state(user_id, "waiting_feedback")
         await update.message.reply_text(
             "Спасибо что выбрали *Alekseev Apartments!* 🙏\n\n"
-            "Нам очень важно ваше мнение — пожалуйста дайте обратную связь здесь в чате!\n\n"
-            "Как вам понравилось проживание? 😊",
+            "Подскажите пожалуйста, всё ли понравилось по проживанию, всё ли хорошо? 😊\n\n"
+            "_Ответьте пожалуйста — это необходимо для продолжения процедуры выселения_",
             parse_mode="Markdown"
         )
     elif "[ПРОДЛЕНИЕ]" in reply:
@@ -2817,6 +2850,27 @@ async def tg_admin(text):
     except Exception as e:
         print(f"[MAX] TG notify error: {e}", flush=True)
 
+async def notify_maids_max(apt_name):
+    """Уведомить горничных из MAX бота через Telegram HTTP"""
+    tok = os.getenv("TELEGRAM_TOKEN")
+    if not tok:
+        return
+    maids = load_maids()
+    apt_key = apt_name.replace(" ", "_").lower()
+    chat_ids = maids.get(apt_key, []) + maids.get("all", [])
+    print(f"[MAIDS] MAX уведомление для {apt_name} (ключ: {apt_key}), горничные: {chat_ids}", flush=True)
+    try:
+        import httpx
+        async with httpx.AsyncClient() as c:
+            for cid in set(chat_ids):
+                await c.post(f"https://api.telegram.org/bot{tok}/sendMessage",
+                    json={"chat_id": cid,
+                          "text": f"🧹 *Уборка — {apt_name}*\n\nГость выехал — апартамент готов к уборке!",
+                          "parse_mode": "Markdown"})
+                print(f"[MAIDS] Отправлено горничной {cid}", flush=True)
+    except Exception as e:
+        print(f"[MAIDS] Ошибка: {e}", flush=True)
+
 async def tg_admin_photo(caption, photo_url, media_type="image/jpeg"):
     """Скачать файл из MAX и отправить как фото/документ администратору в Telegram"""
     aid = os.getenv("ADMIN_CHAT_ID")
@@ -2924,10 +2978,11 @@ def start_max_bot():
         else:
             if expected_amount:
                 prompt = (f"Это банковский чек или квитанция о переводе денег?\n"
-                         f"Ожидаемая сумма: {expected_amount} руб.\n"
+                         f"Ожидаемая сумма ПЕРЕВОДА: {expected_amount} руб.\n"
+                         f"Найди СУММУ ПЕРЕВОДА — главное число рядом со словами 'Сумма перевода', 'Сумма операции', 'Перевод', 'Списано'. НЕ бери остаток на счёте и НЕ бери комиссию.\n"
                          f"Ответь СТРОГО одной строкой без пояснений:\n"
-                         f"ЧЕК:ДА:{expected_amount} — если чек и сумма совпадает\n"
-                         f"ЧЕК:ДА:СУММА — если чек но другая сумма (укажи цифры)\n"
+                         f"ЧЕК:ДА:{expected_amount} — если чек и сумма перевода совпадает\n"
+                         f"ЧЕК:ДА:СУММА — если чек но другая сумма перевода (укажи цифры)\n"
                          f"НЕ_ЧЕК — если не чек об оплате")
             else:
                 prompt = "Это банковский чек о переводе денег? Ответь ТОЛЬКО: ЧЕК:ДА или НЕ_ЧЕК"
@@ -3426,11 +3481,13 @@ def start_max_bot():
             if "ВЫЕЗД" in intent:
                 apt_name = max_apt.get(uid, "апартамент")
                 await tg_admin(f"🚪 *{apt_name} — выехали* (MAX)\nГость: {un}")
+                # Уведомляем горничных
+                await notify_maids_max(apt_name)
                 max_states[uid] = "waiting_feedback"
                 await event.message.answer(
                     "Спасибо что выбрали Alekseev Apartments! 🙏\n\n"
-                    "Нам очень важно ваше мнение — пожалуйста дайте обратную связь здесь в чате!\n\n"
-                    "Как вам понравилось проживание? 😊"
+                    "Подскажите пожалуйста, всё ли понравилось по проживанию, всё ли хорошо? 😊\n\n"
+                    "_Ответьте пожалуйста — это необходимо для продолжения процедуры выселения_"
                 )
                 return
 
@@ -3449,6 +3506,25 @@ def start_max_bot():
 
         if state == "waiting_requisites_negative":
             apt_name = max_apt.get(uid, "неизвестный апартамент")
+            # Проверяем реквизиты
+            check = claude.messages.create(
+                model="claude-sonnet-4-6", max_tokens=10,
+                messages=[{"role": "user", "content":
+                    f"Это реквизиты для банковского перевода? Достаточно любых двух из трёх: номер телефона, название банка, ФИО получателя.\n"
+                    f"Текст: \"{text}\"\nОтветь только: РЕКВИЗИТЫ или НЕТ"}]
+            ).content[0].text.strip().upper()
+
+            if "НЕТ" in check:
+                await event.message.answer(
+                    "Для возврата залога пришлите пожалуйста реквизиты.\n\n"
+                    "Достаточно указать:\n"
+                    "📱 Номер телефона + банк\n"
+                    "или\n"
+                    "📱 Номер телефона + ФИО получателя\n\n"
+                    "Например: +79001234567 / Сбербанк / Иванов Иван"
+                )
+                return
+
             tg_tok = os.getenv("TELEGRAM_TOKEN")
             admin_id = get_admin_chat_id()
             if admin_id and tg_tok:
@@ -3476,6 +3552,25 @@ def start_max_bot():
 
         if state == "waiting_requisites":
             apt_name = max_apt.get(uid, "неизвестный апартамент")
+            # Проверяем что это реквизиты — достаточно номера телефона + банк ИЛИ номер телефона + ФИО
+            check = claude.messages.create(
+                model="claude-sonnet-4-6", max_tokens=10,
+                messages=[{"role": "user", "content":
+                    f"Это реквизиты для банковского перевода? Достаточно любых двух из трёх: номер телефона, название банка, ФИО получателя.\n"
+                    f"Текст: \"{text}\"\nОтветь только: РЕКВИЗИТЫ или НЕТ"}]
+            ).content[0].text.strip().upper()
+
+            if "НЕТ" in check:
+                await event.message.answer(
+                    "Для возврата залога пришлите пожалуйста реквизиты.\n\n"
+                    "Достаточно указать:\n"
+                    "📱 Номер телефона + банк\n"
+                    "или\n"
+                    "📱 Номер телефона + ФИО получателя\n\n"
+                    "Например: +79001234567 / Сбербанк / Иванов Иван"
+                )
+                return
+
             tg_tok = os.getenv("TELEGRAM_TOKEN")
             admin_id = get_admin_chat_id()
             if admin_id and tg_tok:
