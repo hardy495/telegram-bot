@@ -57,6 +57,7 @@ def save_balances_to_file(balances):
         json.dump(balances, f, ensure_ascii=False, indent=2)
 
 STATES_FILE = "guest_states.json"
+GUEST_APT_FILE = "guest_apt.json"
 
 def load_guest_states():
     if os.path.exists(STATES_FILE):
@@ -76,6 +77,25 @@ def save_guest_state(user_id, state):
         states[user_id] = state
     with open(STATES_FILE, "w", encoding="utf-8") as f:
         json.dump(states, f, ensure_ascii=False, indent=2)
+
+def load_guest_apt():
+    if os.path.exists(GUEST_APT_FILE):
+        try:
+            with open(GUEST_APT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {int(k): v for k, v in data.items()}
+        except:
+            pass
+    return {}
+
+def save_guest_apt(user_id, apt_name):
+    apts = load_guest_apt()
+    if apt_name:
+        apts[user_id] = apt_name
+    else:
+        apts.pop(user_id, None)
+    with open(GUEST_APT_FILE, "w", encoding="utf-8") as f:
+        json.dump(apts, f, ensure_ascii=False, indent=2)
 
 # Загружаем балансы из файла при старте
 guest_balances = load_balances_from_file()
@@ -214,6 +234,12 @@ SYSTEM_PROMPT = """Ты вежливый и профессиональный п�
 3. Внутри лежат ключи — берите и открывайте квартиру
 
 === ПОМОЩЬ С ЗАСЕЛЕНИЕМ (НЕ ЖАЛОБА) ===
+Если гость не может найти дом или говорит что не может найти адрес — это НЕ претензия, нужно помочь. Определи по контексту в каком апартаменте гость и дай точную подсказку:
+• 182 кв (Красная 176) — ориентир: рядом с торговым центром, вход через проулок с левой стороны ТЦ где ресторан "Голый повар", справа будет указатель подъездов 1 и 2. Также можно войти через ТЦ (чуть левее центрального входа) или через парковку -1 этажа
+• 159 кв, 49 кв, 243 кв, 7 кв (Октябрьская 181/2) — большой жилой комплекс, ориентир: между двумя Пятёрочками. Для въезда на территорию позвоните на +7 918 148 00 45 и нажмите 4 — откроются ворота №1
+• 86 кв (Коммунаров 270) — если гость не может найти, уточни с какой улицы он подъезжает
+• 2 кв (Гаражная 107) — небольшой дом, подъезд 1, квартира на 1 этаже
+
 Если гость не может открыть дверь подъезда, домофон не реагирует или не открывается — это НЕ претензия, нужно помочь:
 • Объясни что домофон открывается кодом квартиры (например 208 для 182 кв) — набрать номер квартиры на домофоне, дождаться сигнала и дверь откроется
 • Если домофон не реагирует — возможно гость у неправильного подъезда или дома, попроси проверить
@@ -225,7 +251,7 @@ SYSTEM_PROMPT = """Ты вежливый и профессиональный п�
 • На Октябрьской несколько корпусов — легко перепутать: 159 кв — корпус 3 подъезд 3, 243 кв — подъезд 4, 49 кв — подъезд 1, 7 кв — корпус 3 подъезд 1
 • Если пароль не срабатывает или рычажок не опускается — проверить правильный ли подъезд и корпус
 
-Эти ситуации (домофон, минисейф, ворота) — это вопросы о помощи, НЕ жалобы. Не добавляй тег [ЖАЛОБА]. Помоги гостю самостоятельно используя информацию выше.
+Эти ситуации (не может найти дом, домофон, минисейф, ворота) — это вопросы о помощи, НЕ жалобы. Не добавляй тег [ЖАЛОБА]. Помоги гостю самостоятельно используя информацию выше.
 
 === ПРАВИЛА ОБЩЕНИЯ ===
 - Отвечай только на русском языке
@@ -496,14 +522,17 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
     # Кнопка "Не получил" для MAX гостя
     if query.data.startswith("max_not_received_"):
         max_guest_id = int(query.data.split("_")[3])
+        # Сохраняем паспорт — он уже был принят, нужен только новый чек
+        max_docs.setdefault(max_guest_id, {})["has_passport"] = True
+        max_docs[max_guest_id]["has_payment"] = False
         max_states[max_guest_id] = "waiting_docs"
         max_outbox[max_guest_id] = (
             f"⚠️ Оплата не поступила.\n\n"
-            f"Пожалуйста, проверьте правильность перевода и пришлите чек повторно.\n\n"
+            f"Пожалуйста проверьте правильность перевода и пришлите новый чек об оплате 🧾\n\n"
             f"Реквизиты:\n{PAYMENT_INFO}\n\n"
             f"При переводе ничего не пишите в комментарии к платежу."
         )
-        await query.edit_message_text("❌ Гость уведомлён — оплата не поступила.")
+        await query.edit_message_text("❌ Гость уведомлён — оплата не поступила. Паспорт сохранён, ждём новый чек.")
         return
 
     # Кнопка выбора апартамента для MAX гостя
@@ -723,6 +752,10 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         apt_name = apt_names[apt_index]
         apt_info = objects[apt_name]
 
+        # Сохраняем апартамент гостя в файл для восстановления после перезапуска
+        context.bot_data.setdefault("guest_apt", {})[guest_id] = apt_name
+        save_guest_apt(guest_id, apt_name)
+
         # Кнопки "Мы выехали" и "Новая бронь"
         checkout_keyboard = InlineKeyboardMarkup([
             [
@@ -773,9 +806,10 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
 
         # Уведомляем администратора
         if get_admin_chat_id():
+            guest_username = f"@{query.from_user.username}" if query.from_user.username else f"{query.from_user.first_name} (ID: {query.from_user.id})"
             await context.bot.send_message(
                 chat_id=get_admin_chat_id(),
-                text=f"🚪 *{apt_name} — выехали*",
+                text=f"🚪 *{apt_name} — выехали*\nГость: {guest_username}",
                 parse_mode="Markdown"
             )
 
@@ -1541,11 +1575,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Проверяем сумму через Claude
             guest_name = context.user_data.get("guest_name", "").lower()
             date_from = context.user_data.get("date_from", "")
+            # Также пробуем найти по guest_name_to_id
+            if not guest_name:
+                for name, uid in guest_name_to_id.items():
+                    if uid == user_id:
+                        guest_name = name.lower()
+                        break
             expected_amount = None
-            for key, data in guest_balances.items():
+            bals = load_balances_from_file()
+            for key, data in bals.items():
                 name_match = bool(set(data["name_lower"].split()) & set(guest_name.split())) or data["name_lower"] in guest_name or guest_name in data["name_lower"]
                 date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
-                if name_match and date_match:
+                if name_match and (date_match or not date_from):
                     expected_amount = DEPOSIT if data["amount"] == 0 else data["amount"] + DEPOSIT
                     break
 
@@ -2571,18 +2612,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 model="claude-sonnet-4-6", max_tokens=10,
                 messages=[{"role": "user", "content":
                     f"Это отзыв гостя об отеле: \"{user_text}\"\n"
-                    f"Ответь только одним словом: ПОЗИТИВНЫЙ или НЕГАТИВНЫЙ"}]
+                    f"Ответь только одним словом: ПОЗИТИВНЫЙ, НЕЙТРАЛЬНЫЙ или НЕГАТИВНЫЙ"}]
             ).content[0].text.strip().upper()
+            # Нейтральный обрабатываем как негативный
+            if "НЕЙТРАЛЬНЫЙ" in sentiment:
+                sentiment = "НЕЙТРАЛЬНЫЙ"
 
         # Отправляем отзыв администратору
         admin_id = get_admin_chat_id()
         if admin_id:
+            if "ПОЗИТИВ" in sentiment:
+                icon, tone = "⭐", "😊 Позитивный"
+            elif "НЕЙТРАЛЬНЫЙ" in sentiment:
+                icon, tone = "💬", "😐 Нейтральный"
+            else:
+                icon, tone = "⚠️", "😞 Негативный"
             await context.bot.send_message(
                 chat_id=admin_id,
-                text=f"{'⭐' if 'ПОЗИТИВ' in sentiment else '⚠️'} *Отзыв от гостя*\n\n"
+                text=f"{icon} *Отзыв от гостя*\n\n"
                      f"Апартамент: *{apt_name}*\n"
                      f"Гость: {username}\n"
-                     f"Тональность: {'😊 Позитивный' if 'ПОЗИТИВ' in sentiment else '😞 Негативный'}\n\n"
+                     f"Тональность: {tone}\n\n"
                      f"{user_text}",
                 parse_mode="Markdown"
             )
@@ -2692,7 +2742,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Верифицированный гость — отвечаем через Claude
     # Включаем информацию об апартаменте гостя в контекст
-    apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "")
+    apt_name = (context.bot_data.get("guest_apt", {}).get(user_id) or
+                context.bot_data.get("guest_apt", {}).get(str(user_id)) or
+                load_guest_apt().get(user_id) or
+                "")
     apt_context = ""
     if apt_name:
         memory = load_memory()
@@ -2727,9 +2780,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "апартамент")
         admin_id = get_admin_chat_id()
         if admin_id:
+            checkout_username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user_id})"
             await context.bot.send_message(
                 chat_id=admin_id,
-                text=f"🚪 *{apt_name} — выехали*",
+                text=f"🚪 *{apt_name} — выехали*\nГость: {checkout_username}",
                 parse_mode="Markdown"
             )
         guest_states[user_id] = "waiting_feedback"
@@ -3169,17 +3223,15 @@ def start_max_bot():
                         guest_name_lower = guest_info.get("name", "").lower()
                         expected_amount = None
                         bals = load_balances_from_file()
-                        # Ищем по имени гостя
+                        # Ищем по имени гостя — только точное совпадение по словам
                         if guest_name_lower:
                             for k, d in bals.items():
-                                if d["name_lower"] in guest_name_lower or guest_name_lower in d["name_lower"]:
+                                name_words = set(d["name_lower"].split())
+                                guest_words = set(guest_name_lower.split())
+                                if name_words & guest_words:
                                     expected_amount = DEPOSIT if d["amount"] == 0 else d["amount"] + DEPOSIT
                                     break
-                        # Если не нашли по имени — берём последнюю добавленную бронь
-                        if not expected_amount and bals:
-                            last = list(bals.values())[-1]
-                            expected_amount = DEPOSIT if last["amount"] == 0 else last["amount"] + DEPOSIT
-                        print(f"[MAX] expected_amount={expected_amount}", flush=True)
+                        print(f"[MAX] expected_amount={expected_amount} для гостя '{guest_name_lower}'", flush=True)
 
                         if media_type == "application/pdf":
                             pdf_data = base64.standard_b64encode(img_bytes).decode()
@@ -3329,7 +3381,7 @@ def start_max_bot():
             total = DEPOSIT if amt == 0 else amt + DEPOSIT
             max_states[uid] = "waiting_docs"
             max_docs[uid] = {}
-            await tg_admin(f"🆕 Новый гость (MAX): {un}\n{name} | {dfrom}\n✅ Бронь найдена")
+            await tg_admin(f"🆕 Новый гость (MAX): {un}\n{name} | {dfrom}\n✅ Бронь найдена | Сумма: {total} руб.")
             if amt == 0:
                 await event.message.answer(
                     f"✅ Бронь найдена!\n\n"
@@ -3618,13 +3670,20 @@ def start_max_bot():
                 sentiment = claude.messages.create(
                     model="claude-sonnet-4-6", max_tokens=10,
                     messages=[{"role":"user","content":
-                        f"Это отзыв гостя: \"{text}\"\nОтветь только: ПОЗИТИВНЫЙ или НЕГАТИВНЫЙ"}]
+                        f"Это отзыв гостя: \"{text}\"\nОтветь только: ПОЗИТИВНЫЙ, НЕЙТРАЛЬНЫЙ или НЕГАТИВНЫЙ"}]
                 ).content[0].text.strip().upper()
 
+            if "ПОЗИТИВ" in sentiment:
+                icon, tone = "⭐", "😊 Позитивный"
+            elif "НЕЙТРАЛЬНЫЙ" in sentiment:
+                icon, tone = "💬", "😐 Нейтральный"
+            else:
+                icon, tone = "⚠️", "😞 Негативный"
+
             await tg_admin(
-                f"{'⭐' if 'ПОЗИТИВ' in sentiment else '⚠️'} Отзыв (MAX)\n"
+                f"{icon} Отзыв (MAX)\n"
                 f"Апартамент: {apt_name}\nГость: {un}\n"
-                f"Тональность: {'😊 Позитивный' if 'ПОЗИТИВ' in sentiment else '😞 Негативный'}\n\n{text}"
+                f"Тональность: {tone}\n\n{text}"
             )
 
             if "ПОЗИТИВ" in sentiment:
