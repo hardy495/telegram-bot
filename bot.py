@@ -208,8 +208,8 @@ SYSTEM_PROMPT = """Ты вежливый и профессиональный п�
 
 Для апартамента на ул. Красная 176:
 • Платная парковка на -1 этаже здания — индивидуальное место стоит 1000 руб/сутки
-• Бесплатная парковка на ул. Путевая
-• Платная парковка непосредственно с ул. Красная 176 при наличии свободных мест — 60 руб/час по будням с 8:00 до 20:00
+• Парковка на ул. Путевая — городская платная: 50 руб/час с 8:00 до 20:00, с 20:00 до 8:00 бесплатно
+• Платная парковка с ул. Красная 176 — 60 руб/час по будням с 8:00 до 20:00, с 20:00 до 8:00 бесплатно
 
 Если гость спрашивает про парковку на Красной 176 и интересуется индивидуальным местом — верни ровно: [ПАРКОВКА_КРАСНАЯ]
 Если гость явно хочет купить/приобрести парковочное место (пишет "хочу купить", "хочу приобрести", "как оплатить", "да хочу") — верни ровно: [КУПИТЬ_ПАРКОВКУ]
@@ -588,8 +588,10 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
             )
 
         # Уведомляем горничных
+        guest_info_maid = max_guest_names.get(max_guest_id, {})
+        guest_name_maid = guest_info_maid.get("name", "имя не указано")
         await notify_maids(context, apt_name,
-            f"🧹 *Уборка — {apt_name}*\n\nГость выехал — апартамент готов к уборке!"
+            f"🧹 *Уборка — {apt_name}*\n({guest_name_maid})\n\nГость выехал — апартамент готов к уборке!"
         )
 
         max_states[max_guest_id] = "waiting_feedback"
@@ -2611,7 +2613,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sentiment = claude.messages.create(
                 model="claude-sonnet-4-6", max_tokens=10,
                 messages=[{"role": "user", "content":
-                    f"Это отзыв гостя об отеле: \"{user_text}\"\n"
+                    f"Это отзыв гостя об отеле: \"{user_text}\"\n\n"
+                    f"ПОЗИТИВНЫЙ — гость доволен, говорит что всё хорошо/понравилось, даже если упоминает мелкие моменты.\n"
+                    f"НЕЙТРАЛЬНЫЙ — гость перечисляет что-то что не понравилось, но в целом остался доволен (пишет 'всё остальное пойдёт', 'в целом нормально' и т.п.).\n"
+                    f"НЕГАТИВНЫЙ — гость откровенно недоволен, перечисляет претензии без позитивных оговорок.\n\n"
                     f"Ответь только одним словом: ПОЗИТИВНЫЙ, НЕЙТРАЛЬНЫЙ или НЕГАТИВНЫЙ"}]
             ).content[0].text.strip().upper()
             # Нейтральный обрабатываем как негативный
@@ -2813,8 +2818,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🚗 *Варианты парковки для Красная 176:*\n\n"
             "• **Индивидуальное место на -1 этаже** — *1000 руб/сутки*\n"
-            "• **Бесплатно** — ул. Путевая\n"
-            "• **Платная с ул. Красная 176** — 60 руб/час по будням с 8:00 до 20:00",
+            "• ул. Путевая — 50 руб/час (с 20:00 до 8:00 бесплатно)\n"
+            "• С ул. Красная 176 — 60 руб/час по будням (с 20:00 до 8:00 бесплатно)",
             parse_mode="Markdown",
             reply_markup=parking_keyboard
         )
@@ -2875,7 +2880,26 @@ max_waiting = {}     # user_id ждёт пока админ внесёт бро�
 max_apt = {}         # user_id -> название апартамента
 max_outbox = {}      # user_id -> сообщение которое нужно отправить
 max_chat_ids = {}    # user_id -> chat_id для отправки
-max_promo_map = {}   # message_id в TG -> MAX user_id (для отправки промокода)
+max_promo_map = {}   # message_id в TG -> MAX user_id
+
+MAX_CHAT_IDS_FILE = "max_chat_ids.json"
+
+def load_max_chat_ids():
+    if os.path.exists(MAX_CHAT_IDS_FILE):
+        try:
+            with open(MAX_CHAT_IDS_FILE, "r") as f:
+                return {int(k): v for k, v in json.load(f).items()}
+        except:
+            pass
+    return {}
+
+def save_max_chat_id(uid, cid):
+    ids = load_max_chat_ids()
+    ids[uid] = cid
+    with open(MAX_CHAT_IDS_FILE, "w") as f:
+        json.dump(ids, f)
+
+max_chat_ids = load_max_chat_ids()
 tg_admin_tasks = []  # задачи из MAX потока для выполнения в Telegram
 _max_loop = None
 max_bot_instance = None
@@ -2904,7 +2928,7 @@ async def tg_admin(text):
     except Exception as e:
         print(f"[MAX] TG notify error: {e}", flush=True)
 
-async def notify_maids_max(apt_name):
+async def notify_maids_max(apt_name, guest_name=""):
     """Уведомить горничных из MAX бота через Telegram HTTP"""
     tok = os.getenv("TELEGRAM_TOKEN")
     if not tok:
@@ -2912,16 +2936,16 @@ async def notify_maids_max(apt_name):
     maids = load_maids()
     apt_key = apt_name.replace(" ", "_").lower()
     chat_ids = maids.get(apt_key, []) + maids.get("all", [])
-    print(f"[MAIDS] MAX уведомление для {apt_name} (ключ: {apt_key}), горничные: {chat_ids}", flush=True)
+    name_part = f"\n({guest_name})" if guest_name else ""
+    print(f"[MAIDS] MAX уведомление для {apt_name}, горничные: {chat_ids}", flush=True)
     try:
         import httpx
         async with httpx.AsyncClient() as c:
             for cid in set(chat_ids):
                 await c.post(f"https://api.telegram.org/bot{tok}/sendMessage",
                     json={"chat_id": cid,
-                          "text": f"🧹 *Уборка — {apt_name}*\n\nГость выехал — апартамент готов к уборке!",
+                          "text": f"🧹 *Уборка — {apt_name}*{name_part}\n\nГость выехал — апартамент готов к уборке!",
                           "parse_mode": "Markdown"})
-                print(f"[MAIDS] Отправлено горничной {cid}", flush=True)
     except Exception as e:
         print(f"[MAIDS] Ошибка: {e}", flush=True)
 
@@ -3128,6 +3152,7 @@ def start_max_bot():
         chat_id = getattr(event.message, 'recipient', None)
         chat_id = getattr(chat_id, 'chat_id', None) or uid
         max_chat_ids[uid] = chat_id
+        save_max_chat_id(uid, chat_id)
         un = uname(event.message.sender)
         state = max_states.get(uid)
         body = event.message.body
@@ -3534,7 +3559,9 @@ def start_max_bot():
                 apt_name = max_apt.get(uid, "апартамент")
                 await tg_admin(f"🚪 *{apt_name} — выехали* (MAX)\nГость: {un}")
                 # Уведомляем горничных
-                await notify_maids_max(apt_name)
+                guest_info_maid2 = max_guest_names.get(uid, {})
+                guest_name_maid2 = guest_info_maid2.get("name", "имя не указано")
+                await notify_maids_max(apt_name, guest_name_maid2)
                 max_states[uid] = "waiting_feedback"
                 await event.message.answer(
                     "Спасибо что выбрали Alekseev Apartments! 🙏\n\n"
@@ -3670,7 +3697,11 @@ def start_max_bot():
                 sentiment = claude.messages.create(
                     model="claude-sonnet-4-6", max_tokens=10,
                     messages=[{"role":"user","content":
-                        f"Это отзыв гостя: \"{text}\"\nОтветь только: ПОЗИТИВНЫЙ, НЕЙТРАЛЬНЫЙ или НЕГАТИВНЫЙ"}]
+                        f"Это отзыв гостя: \"{text}\"\n\n"
+                        f"ПОЗИТИВНЫЙ — гость доволен, говорит что всё хорошо/понравилось, даже если упоминает мелкие моменты.\n"
+                        f"НЕЙТРАЛЬНЫЙ — гость перечисляет что-то что не понравилось, но в целом остался доволен (пишет 'всё остальное пойдёт', 'в целом нормально' и т.п.).\n"
+                        f"НЕГАТИВНЫЙ — гость откровенно недоволен, перечисляет претензии без позитивных оговорок.\n\n"
+                        f"Ответь только одним словом: ПОЗИТИВНЫЙ, НЕЙТРАЛЬНЫЙ или НЕГАТИВНЫЙ"}]
                 ).content[0].text.strip().upper()
 
             if "ПОЗИТИВ" in sentiment:
@@ -3738,20 +3769,66 @@ def start_max_bot():
         reply = rep.content[0].text
 
         if "[НУЖЕН_ОПЕРАТОР]" in reply:
-            await tg_admin(f"❓ Вопрос (MAX) от {un}:\n\n{text}")
+            tg_tok = os.getenv("TELEGRAM_TOKEN")
+            admin_id = get_admin_chat_id()
+            if admin_id and tg_tok:
+                try:
+                    import httpx as _hx
+                    async with _hx.AsyncClient() as c:
+                        r = await c.post(
+                            f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={
+                                "chat_id": admin_id,
+                                "text": f"❓ Вопрос (MAX) от {un}:\n\n{text}\n\n"
+                                        f"Ответьте Reply — гость получит ответ в MAX автоматически!"
+                            }
+                        )
+                        msg_data = r.json()
+                        if msg_data.get("ok"):
+                            max_promo_map[msg_data["result"]["message_id"]] = uid
+                except Exception as e:
+                    print(f"[MAX] Ошибка вопроса: {e}", flush=True)
             clean_reply = reply.replace("[НУЖЕН_ОПЕРАТОР]", "").strip()
             if clean_reply:
                 max_hist[uid].append({"role":"assistant","content":clean_reply})
                 await event.message.answer(clean_reply)
             await event.message.answer("Также передал ваш вопрос оператору — свяжемся в ближайшее время! 😊")
         elif "[ПОЖЕЛАНИЕ]" in reply:
-            await tg_admin(f"💬 Пожелание гостя (MAX) от {un}:\n\n{text}")
+            tg_tok = os.getenv("TELEGRAM_TOKEN")
+            admin_id = get_admin_chat_id()
+            if admin_id and tg_tok:
+                try:
+                    import httpx as _hx
+                    async with _hx.AsyncClient() as c:
+                        r = await c.post(
+                            f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={"chat_id": admin_id,
+                                  "text": f"💬 Пожелание гостя (MAX) от {un}:\n\n{text}\n\nОтветьте Reply если хотите ответить гостю!"}
+                        )
+                        if r.json().get("ok"):
+                            max_promo_map[r.json()["result"]["message_id"]] = uid
+                except Exception as e:
+                    print(f"[MAX] Ошибка пожелания: {e}", flush=True)
             clean_reply = reply.replace("[ПОЖЕЛАНИЕ]", "").strip()
             clean_reply += "\n\nСпасибо за ваше пожелание! 🙏 Мы передали его администратору."
             max_hist[uid].append({"role":"assistant","content":clean_reply})
             await event.message.answer(clean_reply)
         elif "[ЖАЛОБА]" in reply:
-            await tg_admin(f"⚠️ ЖАЛОБА/ПРЕТЕНЗИЯ (MAX) от {un}:\n\n{text}")
+            tg_tok = os.getenv("TELEGRAM_TOKEN")
+            admin_id = get_admin_chat_id()
+            if admin_id and tg_tok:
+                try:
+                    import httpx as _hx
+                    async with _hx.AsyncClient() as c:
+                        r = await c.post(
+                            f"https://api.telegram.org/bot{tg_tok}/sendMessage",
+                            json={"chat_id": admin_id,
+                                  "text": f"⚠️ ЖАЛОБА/ПРЕТЕНЗИЯ (MAX) от {un}:\n\n{text}\n\nОтветьте Reply чтобы ответить гостю в MAX!"}
+                        )
+                        if r.json().get("ok"):
+                            max_promo_map[r.json()["result"]["message_id"]] = uid
+                except Exception as e:
+                    print(f"[MAX] Ошибка жалобы: {e}", flush=True)
             clean_reply = reply.replace("[ЖАЛОБА]", "").strip()
             max_hist[uid].append({"role":"assistant","content":clean_reply})
             await event.message.answer(clean_reply)
@@ -3794,8 +3871,8 @@ def start_max_bot():
             parking_text = (
                 "🚗 Варианты парковки:\n\n"
                 "• Индивидуальное место -1 этаж — 1000 руб/сутки\n"
-                "• Бесплатно — ул. Путевая\n"
-                "• Платная с ул. Красная 176 — 60 руб/час 8-20 будни\n\n"
+                "• Ул. Путевая — 50 руб/час (с 20:00 до 8:00 бесплатно)\n"
+                "• С ул. Красная 176 — 60 руб/час по будням (с 20:00 до 8:00 бесплатно)\n\n"
                 "Если хотите приобрести индивидуальное место — напишите нам!"
             )
             max_hist[uid].append({"role":"assistant","content":parking_text})
