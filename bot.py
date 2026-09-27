@@ -246,10 +246,11 @@ SYSTEM_PROMPT = """Ты вежливый и профессиональный п�
 
 Если гость не может найти минисейф или говорит что его нет — это НЕ претензия, нужно помочь:
 • Минисейф находится рядом с дверью в квартиру или у входа на этаже
-• По 159 кв — рядом с минисейфом стоит шкаф, это ориентир
+• По 159 кв — рядом с минисейфом стоит шкаф, это ориентир. Для других квартир шкафа рядом нет
 • Если минисейфа нет — скорее всего гость не в том доме или подъезде
 • На Октябрьской несколько корпусов — легко перепутать: 159 кв — корпус 3 подъезд 3, 243 кв — подъезд 4, 49 кв — подъезд 1, 7 кв — корпус 3 подъезд 1
 • Если пароль не срабатывает или рычажок не опускается — проверить правильный ли подъезд и корпус
+• Не упоминай шкаф как ориентир для 7 кв, 49 кв, 243 кв, 182 кв, 86 кв и 2 кв — там шкафа рядом с минисейфом нет
 
 Эти ситуации (не может найти дом, домофон, минисейф, ворота) — это вопросы о помощи, НЕ жалобы. Не добавляй тег [ЖАЛОБА]. Помоги гостю самостоятельно используя информацию выше.
 
@@ -805,6 +806,7 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         parts = query.data.split("_", 2)
         guest_id = int(parts[1])
         apt_name = parts[2] if len(parts) > 2 else "апартамент"
+        await query.answer()
 
         # Уведомляем администратора
         if get_admin_chat_id():
@@ -816,8 +818,9 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
             )
 
         # Уведомляем горничных
+        guest_bname = context.user_data.get("guest_name", "") or ""
         await notify_maids(context, apt_name,
-            f"🧹 *Уборка — {apt_name}*\n\nГость выехал — апартамент готов к уборке!"
+            f"🧹 *Уборка — {apt_name}*\n({guest_bname or 'имя не указано'})\n\nГость выехал — апартамент готов к уборке!"
         )
 
         await query.edit_message_reply_markup(reply_markup=None)
@@ -1575,22 +1578,24 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             # Проверяем сумму через Claude
-            guest_name = context.user_data.get("guest_name", "").lower()
-            date_from = context.user_data.get("date_from", "")
-            # Также пробуем найти по guest_name_to_id
-            if not guest_name:
-                for name, uid in guest_name_to_id.items():
-                    if uid == user_id:
-                        guest_name = name.lower()
+            # Сначала берём сохранённую сумму для этого гостя
+            expected_amount = context.user_data.get("expected_amount")
+            if not expected_amount:
+                guest_name = context.user_data.get("guest_name", "").lower()
+                date_from = context.user_data.get("date_from", "")
+                if not guest_name:
+                    for name, uid in guest_name_to_id.items():
+                        if uid == user_id:
+                            guest_name = name.lower()
+                            break
+                bals = load_balances_from_file()
+                for key, data in bals.items():
+                    name_match = bool(set(data["name_lower"].split()) & set(guest_name.split())) or data["name_lower"] in guest_name or guest_name in data["name_lower"]
+                    date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
+                    if name_match and (date_match or not date_from):
+                        expected_amount = DEPOSIT if data["amount"] == 0 else data["amount"] + DEPOSIT
                         break
-            expected_amount = None
-            bals = load_balances_from_file()
-            for key, data in bals.items():
-                name_match = bool(set(data["name_lower"].split()) & set(guest_name.split())) or data["name_lower"] in guest_name or guest_name in data["name_lower"]
-                date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
-                if name_match and (date_match or not date_from):
-                    expected_amount = DEPOSIT if data["amount"] == 0 else data["amount"] + DEPOSIT
-                    break
+            print(f"[TG] expected_amount={expected_amount} для user_id={user_id}", flush=True)
 
             if expected_amount:
                 amount_check = claude.messages.create(
@@ -1711,15 +1716,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🧾 Чек уже получен. Пришлите фото паспорта 📄")
             return
 
-        guest_name = context.user_data.get("guest_name", "").lower()
-        date_from = context.user_data.get("date_from", "")
-        expected_amount = None
-        for key, data in guest_balances.items():
-            name_match = bool(set(data["name_lower"].split()) & set(guest_name.split())) or data["name_lower"] in guest_name or guest_name in data["name_lower"]
-            date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
-            if name_match and date_match:
-                expected_amount = DEPOSIT if data["amount"] == 0 else data["amount"] + DEPOSIT
-                break
+        expected_amount = context.user_data.get("expected_amount")
+        if not expected_amount:
+            guest_name = context.user_data.get("guest_name", "").lower()
+            date_from = context.user_data.get("date_from", "")
+            for key, data in guest_balances.items():
+                name_match = bool(set(data["name_lower"].split()) & set(guest_name.split())) or data["name_lower"] in guest_name or guest_name in data["name_lower"]
+                date_match = not date_from or data["date_from"] in date_from or date_from in data["date_from"]
+                if name_match and date_match:
+                    expected_amount = DEPOSIT if data["amount"] == 0 else data["amount"] + DEPOSIT
+                    break
+        print(f"[TG] handle_photo expected_amount={expected_amount}", flush=True)
 
         is_valid, reason = await analyze_photo_with_ai(bytes(file_bytes), "payment", expected_amount)
 
@@ -2234,6 +2241,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total = amount + DEPOSIT
             guest_states[user_id] = "waiting_docs"
             guest_name_to_id[name.lower()] = user_id
+            # Сохраняем ожидаемую сумму для проверки чека
+            context.user_data["expected_amount"] = total
 
             # Уведомляем администратора что бронь найдена
             username = f"@{user.username}" if user.username else f"{user.first_name}"
