@@ -152,6 +152,22 @@ def load_maids():
     """Загружаем список горничных из memory.json"""
     return load_memory().get("maids", {})
 
+def get_guest_booking_info(guest_name_raw):
+    """Получить красивое имя и даты из базы бронирований"""
+    if not guest_name_raw:
+        return None, None, None
+    bals = load_balances_from_file()
+    name_words = set(guest_name_raw.lower().split())
+    for key, data in bals.items():
+        stored_words = set(data["name_lower"].split())
+        if name_words & stored_words:
+            # Красиво форматируем имя — каждое слово с заглавной
+            pretty_name = " ".join(w.capitalize() for w in data["name"].split())
+            return pretty_name, data.get("date_from"), data.get("date_to")
+    # Если не нашли — форматируем то что есть
+    pretty_name = " ".join(w.capitalize() for w in guest_name_raw.split())
+    return pretty_name, None, None
+
 def get_all_knowledge():
     memory = load_memory()
     text = ""
@@ -388,18 +404,30 @@ async def analyze_photo_with_ai(photo_bytes: bytes, expected_type: str, expected
             }]
         )
         result = response.content[0].text.strip()
+        print(f"[TG] Анализ чека: {result[:200]}", flush=True)
 
         is_check = "ЧЕК: ДА" in result.upper()
         if not is_check:
             return False, "not_a_check"
 
-        # Извлекаем найденную сумму всегда
+        # Извлекаем найденную сумму
         found_amount = "неизвестна"
+        found_amount_int = None
         for line in result.split("\n"):
             if "СУММА:" in line.upper():
-                found_amount = line.split(":")[-1].strip()
+                raw = line.split(":")[-1].strip()
+                found_amount = raw
+                # Извлекаем только цифры
+                digits = ''.join(filter(str.isdigit, raw))
+                if digits:
+                    found_amount_int = int(digits)
 
-        # Проверяем совпадение суммы
+        # Числовая проверка суммы
+        if expected_amount and found_amount_int:
+            if found_amount_int != expected_amount:
+                return False, f"wrong_amount:{found_amount}"
+
+        # Если ИИ явно сказал НЕ СОВПАДАЕТ
         if expected_amount and "СОВПАДАЕТ: НЕТ" in result.upper():
             return False, f"wrong_amount:{found_amount}"
 
@@ -590,10 +618,8 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
 
         # Уведомляем горничных
         guest_info_maid = max_guest_names.get(max_guest_id, {})
-        guest_name_maid = guest_info_maid.get("name", "имя не указано")
-        await notify_maids(context, apt_name,
-            f"🧹 *Уборка — {apt_name}*\n({guest_name_maid})\n\nГость выехал — апартамент готов к уборке!"
-        )
+        guest_name_maid = guest_info_maid.get("name", "")
+        await notify_maids_max(apt_name, guest_name_maid)
 
         max_states[max_guest_id] = "waiting_feedback"
         max_outbox[max_guest_id] = {
@@ -819,9 +845,15 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
 
         # Уведомляем горничных
         guest_bname = context.user_data.get("guest_name", "") or ""
-        await notify_maids(context, apt_name,
-            f"🧹 *Уборка — {apt_name}*\n({guest_bname or 'имя не указано'})\n\nГость выехал — апартамент готов к уборке!"
+        pretty_name, date_from, date_to = get_guest_booking_info(guest_bname)
+        dates_str = f"{date_from}–{date_to}" if date_from and date_to else (date_from or "")
+        maid_msg = (
+            f"🧹 *Уборка — {apt_name}*\n\n"
+            f"👤 Гость: *{pretty_name or 'не указано'}*"
+            + (f"\n📅 Даты: {dates_str}" if dates_str else "") +
+            f"\n\nАпартамент готов к уборке!"
         )
+        await notify_maids(context, apt_name, maid_msg)
 
         await query.edit_message_reply_markup(reply_markup=None)
         await context.bot.send_message(
@@ -2604,7 +2636,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    if state in ["waiting_feedback", "checkout_done"]:
+    if state == "waiting_feedback":
         apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "неизвестный апартамент")
         username = f"@{user.username}" if user.username else f"{user.first_name}"
 
@@ -2734,13 +2766,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if state == "checkout_done":
-        await update.message.reply_text(
-            "Рады слышать вас! 😊\n\n"
-            "Для новой брони позвоните на горячую линию:\n"
-            "📞 *+7 918 148 00 45*\n\n"
-            "Дождитесь ответа оператора — он поможет с бронированием!",
-            parse_mode="Markdown"
+        # Отвечаем через Claude тепло на любые сообщения — процедура завершена
+        if uid not in conversation_history: conversation_history[user_id] = []
+        conversation_history[user_id].append({"role": "user", "content": user_text})
+        checkout_system = (
+            "Процедура выселения завершена. Гость уже получил залог и завершил все формальности. "
+            "Отвечай тепло и дружелюбно на любые сообщения гостя. "
+            "Если благодарит — прими благодарность и скажи что всегда рады видеть снова. "
+            "Если хочет новую бронь — скажи позвонить на +7 918 148 00 45. "
+            "НЕ запрашивай отзыв, НЕ спрашивай реквизиты, НЕ начинай новый сценарий заселения."
         )
+        response = claude.messages.create(
+            model="claude-sonnet-4-6", max_tokens=200,
+            system=checkout_system,
+            messages=conversation_history[user_id][-6:]
+        )
+        reply = response.content[0].text.strip()
+        conversation_history[user_id].append({"role": "assistant", "content": reply})
+        await update.message.reply_text(reply)
         return
 
 
@@ -2791,7 +2834,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guest_states[user_id] = "waiting_time_late"
         await ask_guest_time(update, "late")
     elif "[ВЫЕХАЛ]" in reply:
-        apt_name = context.bot_data.get("guest_apt", {}).get(user_id, "апартамент")
+        apt_name = (context.bot_data.get("guest_apt", {}).get(user_id) or
+                   load_guest_apt().get(user_id) or "апартамент")
         admin_id = get_admin_chat_id()
         if admin_id:
             checkout_username = f"@{user.username}" if user.username else f"{user.first_name} (ID: {user_id})"
@@ -2800,6 +2844,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=f"🚪 *{apt_name} — выехали*\nГость: {checkout_username}",
                 parse_mode="Markdown"
             )
+        # Уведомляем горничных
+        guest_bname = context.user_data.get("guest_name", "") or ""
+        pretty_name, date_from, date_to = get_guest_booking_info(guest_bname)
+        dates_str = f"{date_from}–{date_to}" if date_from and date_to else (date_from or "")
+        maid_msg = (
+            f"🧹 *Уборка — {apt_name}*\n\n"
+            f"👤 Гость: *{pretty_name or 'не указано'}*"
+            + (f"\n📅 Даты: {dates_str}" if dates_str else "") +
+            f"\n\nАпартамент готов к уборке!"
+        )
+        await notify_maids(context, apt_name, maid_msg)
+
         guest_states[user_id] = "waiting_feedback"
         save_guest_state(user_id, "waiting_feedback")
         await update.message.reply_text(
@@ -2945,16 +3001,24 @@ async def notify_maids_max(apt_name, guest_name=""):
     maids = load_maids()
     apt_key = apt_name.replace(" ", "_").lower()
     chat_ids = maids.get(apt_key, []) + maids.get("all", [])
-    name_part = f"\n({guest_name})" if guest_name else ""
+
+    # Получаем красивое имя и даты из базы
+    pretty_name, date_from, date_to = get_guest_booking_info(guest_name)
+    dates_str = f"{date_from}–{date_to}" if date_from and date_to else (date_from or "")
+    msg = (
+        f"🧹 *Уборка — {apt_name}*\n\n"
+        f"👤 Гость: *{pretty_name or 'не указано'}*"
+        + (f"\n📅 Даты: {dates_str}" if dates_str else "") +
+        f"\n\nАпартамент готов к уборке!"
+    )
+
     print(f"[MAIDS] MAX уведомление для {apt_name}, горничные: {chat_ids}", flush=True)
     try:
         import httpx
         async with httpx.AsyncClient() as c:
             for cid in set(chat_ids):
                 await c.post(f"https://api.telegram.org/bot{tok}/sendMessage",
-                    json={"chat_id": cid,
-                          "text": f"🧹 *Уборка — {apt_name}*{name_part}\n\nГость выехал — апартамент готов к уборке!",
-                          "parse_mode": "Markdown"})
+                    json={"chat_id": cid, "text": msg, "parse_mode": "Markdown"})
     except Exception as e:
         print(f"[MAIDS] Ошибка: {e}", flush=True)
 
