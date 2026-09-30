@@ -1671,7 +1671,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(chat_id=get_admin_chat_id(), text="Подтвердите:", reply_markup=keyboard)
                     guest_states[user_id] = "waiting_admin_confirmation"
                     await update.message.reply_text(
-                        "✅ Чек получен и передан администратору на проверку. ⏱\n\nКак только проверим — придёт вся информация по заселению!"
+                        "⚠️ Сумма в чеке не совпадает с запрошенной.\n\nПередали администратору на ручную проверку — это займёт не более 15 минут. ⏱"
                     )
                     return
 
@@ -1791,7 +1791,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id=get_admin_chat_id(), text="Подтвердите получение оплаты:", reply_markup=keyboard)
                 guest_states[user_id] = "waiting_admin_confirmation"
                 await update.message.reply_text(
-                    "✅ Чек получен и передан администратору на проверку. ⏱\n\nКак только проверим — придёт вся информация по заселению!"
+                    "⚠️ Сумма в чеке не совпадает с запрошенной.\n\nПередали администратору на ручную проверку — это займёт не более 15 минут. ⏱"
                 )
             return
 
@@ -3375,7 +3375,7 @@ def start_max_bot():
                                     f"Сумма в чеке: {real_amount} руб.\n"
                                     f"Запрошенная: {expected_amount} руб.\n❌ СУММЫ НЕ СОВПАДАЮТ\n{att_url}"
                                 )
-                                await event.message.answer("✅ Чек получен и передан администратору на проверку. ⏱\n\nКак только проверим — придёт вся информация по заселению!")
+                                await event.message.answer("⚠️ Сумма в чеке не совпадает с запрошенной.\n\nПередали администратору на ручную проверку — это займёт не более 15 минут. ⏱")
                                 max_docs.setdefault(uid, {})["has_payment"] = True
                                 if max_docs[uid].get("has_passport"):
                                     await finalize_max_docs(uid, un)
