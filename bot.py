@@ -416,20 +416,20 @@ async def analyze_photo_with_ai(photo_bytes: bytes, expected_type: str, expected
         for line in result.split("\n"):
             if "СУММА:" in line.upper():
                 raw = line.split(":")[-1].strip()
-                found_amount = raw
-                # Извлекаем только цифры
-                digits = ''.join(filter(str.isdigit, raw))
-                if digits:
-                    found_amount_int = int(digits)
+                if raw.upper() != "НЕИЗВЕСТНО":
+                    found_amount = raw
+                    digits = ''.join(filter(str.isdigit, raw))
+                    if digits:
+                        found_amount_int = int(digits)
 
-        # Числовая проверка суммы
-        if expected_amount and found_amount_int:
-            if found_amount_int != expected_amount:
+        # Строгая числовая проверка
+        if expected_amount:
+            if found_amount_int and found_amount_int != expected_amount:
                 return False, f"wrong_amount:{found_amount}"
-
-        # Если ИИ явно сказал НЕ СОВПАДАЕТ
-        if expected_amount and "СОВПАДАЕТ: НЕТ" in result.upper():
-            return False, f"wrong_amount:{found_amount}"
+            elif not found_amount_int and "СОВПАДАЕТ: НЕТ" in result.upper():
+                return False, f"wrong_amount:{found_amount}"
+            # Если нашли сумму и она совпадает — ок
+            return True, f"ok:{found_amount}"
 
         return True, f"ok:{found_amount}"
 
@@ -1671,7 +1671,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(chat_id=get_admin_chat_id(), text="Подтвердите:", reply_markup=keyboard)
                     guest_states[user_id] = "waiting_admin_confirmation"
                     await update.message.reply_text(
-                        "⚠️ Сумма в чеке не совпадает.\n\nЧек передан администратору на проверку. ⏱"
+                        "✅ Чек получен и передан администратору на проверку. ⏱\n\nКак только проверим — придёт вся информация по заселению!"
                     )
                     return
 
@@ -1791,7 +1791,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id=get_admin_chat_id(), text="Подтвердите получение оплаты:", reply_markup=keyboard)
                 guest_states[user_id] = "waiting_admin_confirmation"
                 await update.message.reply_text(
-                    "⚠️ Сумма в чеке не совпадает. Чек передан администратору. ⏱"
+                    "✅ Чек получен и передан администратору на проверку. ⏱\n\nКак только проверим — придёт вся информация по заселению!"
                 )
             return
 
@@ -1956,7 +1956,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id=get_admin_chat_id(), text="Подтвердите получение оплаты:", reply_markup=keyboard)
                 guest_states[user_id] = "waiting_admin_confirmation"
                 await update.message.reply_text(
-                    "⚠️ Сумма в чеке не совпадает с запрошенной.\n\n"
+                    "✅ Чек получен!\n\n"
                     "Чек передан администратору на проверку.\n"
                     "Свяжемся с вами в течение 10 минут. ⏱"
                 )
@@ -2766,14 +2766,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if state == "checkout_done":
-        # Отвечаем через Claude тепло на любые сообщения — процедура завершена
-        if uid not in conversation_history: conversation_history[user_id] = []
+        if user_id not in conversation_history:
+            conversation_history[user_id] = []
         conversation_history[user_id].append({"role": "user", "content": user_text})
         checkout_system = (
-            "Процедура выселения завершена. Гость уже получил залог и завершил все формальности. "
-            "Отвечай тепло и дружелюбно на любые сообщения гостя. "
+            "Процедура выселения завершена. Гость уже получил залог. "
+            "Отвечай тепло и дружелюбно. "
             "Если благодарит — прими благодарность и скажи что всегда рады видеть снова. "
-            "Если хочет новую бронь — скажи позвонить на +7 918 148 00 45. "
+            "Если хочет новую бронь — скажи позвонить на 📞 +7 918 148 00 45. "
             "НЕ запрашивай отзыв, НЕ спрашивай реквизиты, НЕ начинай новый сценарий заселения."
         )
         response = claude.messages.create(
@@ -3375,7 +3375,7 @@ def start_max_bot():
                                     f"Сумма в чеке: {real_amount} руб.\n"
                                     f"Запрошенная: {expected_amount} руб.\n❌ СУММЫ НЕ СОВПАДАЮТ\n{att_url}"
                                 )
-                                await event.message.answer("⚠️ Сумма в чеке не совпадает.\n\nЧек передан администратору на проверку. ⏱")
+                                await event.message.answer("✅ Чек получен и передан администратору на проверку. ⏱\n\nКак только проверим — придёт вся информация по заселению!")
                                 max_docs.setdefault(uid, {})["has_payment"] = True
                                 if max_docs[uid].get("has_passport"):
                                     await finalize_max_docs(uid, un)
