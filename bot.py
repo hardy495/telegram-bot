@@ -832,37 +832,54 @@ async def handle_apartment_selection(update: Update, context: ContextTypes.DEFAU
         parts = query.data.split("_", 2)
         guest_id = int(parts[1])
         apt_name = parts[2] if len(parts) > 2 else "апартамент"
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception:
+            pass  # уже отвечено или устарело — не страшно
 
-        # Уведомляем администратора
-        if get_admin_chat_id():
-            guest_username = f"@{query.from_user.username}" if query.from_user.username else f"{query.from_user.first_name} (ID: {query.from_user.id})"
+        try:
+            # Уведомляем администратора
+            if get_admin_chat_id():
+                guest_username = f"@{query.from_user.username}" if query.from_user.username else f"{query.from_user.first_name} (ID: {query.from_user.id})"
+                await context.bot.send_message(
+                    chat_id=get_admin_chat_id(),
+                    text=f"🚪 *{apt_name} — выехали*\nГость: {guest_username}",
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            print(f"[TG] Ошибка уведомления админа при выезде: {e}", flush=True)
+
+        try:
+            # Уведомляем горничных
+            guest_bname = context.user_data.get("guest_name", "") or ""
+            pretty_name, date_from, date_to = get_guest_booking_info(guest_bname)
+            dates_str = f"{date_from}–{date_to}" if date_from and date_to else (date_from or "")
+            maid_msg = (
+                f"🧹 *Уборка — {apt_name}*\n\n"
+                f"👤 Гость: *{pretty_name or 'не указано'}*"
+                + (f"\n📅 Даты: {dates_str}" if dates_str else "") +
+                f"\n\nАпартамент готов к уборке!"
+            )
+            await notify_maids(context, apt_name, maid_msg)
+        except Exception as e:
+            print(f"[TG] Ошибка уведомления горничных при выезде: {e}", flush=True)
+
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass  # сообщение уже изменено
+
+        try:
             await context.bot.send_message(
-                chat_id=get_admin_chat_id(),
-                text=f"🚪 *{apt_name} — выехали*\nГость: {guest_username}",
+                chat_id=guest_id,
+                text="Спасибо что выбрали *Alekseev Apartments!* 🙏\n\n"
+                     "Подскажите пожалуйста, всё ли понравилось по проживанию, всё ли хорошо? 😊\n\n"
+                     "_Ответьте пожалуйста — это необходимо для продолжения процедуры выселения_",
                 parse_mode="Markdown"
             )
+        except Exception as e:
+            print(f"[TG] Ошибка отправки сообщения гостю при выезде: {e}", flush=True)
 
-        # Уведомляем горничных
-        guest_bname = context.user_data.get("guest_name", "") or ""
-        pretty_name, date_from, date_to = get_guest_booking_info(guest_bname)
-        dates_str = f"{date_from}–{date_to}" if date_from and date_to else (date_from or "")
-        maid_msg = (
-            f"🧹 *Уборка — {apt_name}*\n\n"
-            f"👤 Гость: *{pretty_name or 'не указано'}*"
-            + (f"\n📅 Даты: {dates_str}" if dates_str else "") +
-            f"\n\nАпартамент готов к уборке!"
-        )
-        await notify_maids(context, apt_name, maid_msg)
-
-        await query.edit_message_reply_markup(reply_markup=None)
-        await context.bot.send_message(
-            chat_id=guest_id,
-            text="Спасибо что выбрали *Alekseev Apartments!* 🙏\n\n"
-                 "Подскажите пожалуйста, всё ли понравилось по проживанию, всё ли хорошо? 😊\n\n"
-            "_Ответьте пожалуйста — это необходимо для продолжения процедуры выселения_",
-            parse_mode="Markdown"
-        )
         guest_states[guest_id] = "waiting_feedback"
         save_guest_state(guest_id, "waiting_feedback")
     elif query.data.startswith("newbooking_"):
@@ -2915,7 +2932,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation_history[user_id].append({"role": "assistant", "content": reply})
         await update.message.reply_text(reply)
 
+import traceback
+from telegram.error import Conflict, NetworkError, TimedOut
+
+async def error_handler(update, context):
+    err = context.error
+    if isinstance(err, Conflict):
+        print(f"[TG] Конфликт экземпляров бота — старый процесс ещё не завершился. Ждём...", flush=True)
+        return  # не крашимся, просто ждём
+    if isinstance(err, (NetworkError, TimedOut)):
+        print(f"[TG] Сетевая ошибка (временная): {err}", flush=True)
+        return
+    print(f"[TG] Необработанная ошибка: {err}", flush=True)
+    traceback.print_exc()
+
 app = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
+app.add_error_handler(error_handler)
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("newbook", newbook))
@@ -4003,4 +4035,7 @@ def start_max_bot():
 max_thread = threading.Thread(target=start_max_bot, daemon=True)
 max_thread.start()
 
-app.run_polling()
+app.run_polling(
+    drop_pending_updates=True,        # сбросить накопившиеся апдейты при старте
+    allowed_updates=["message", "callback_query"],  # только нужные типы
+)
